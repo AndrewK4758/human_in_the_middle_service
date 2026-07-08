@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	pb "doc_processor/shared_protos"
+	pb "github.com/AndrewK4758/shared_protos"
 )
 
 func TestHumanValidationServer_CreateAndList(t *testing.T) {

@@ -9,7 +9,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection"
 
-	pb "doc_processor/shared_protos"
+	pb "github.com/AndrewK4758/shared_protos"
 	"human_validation_service/internal/server"
 )
 

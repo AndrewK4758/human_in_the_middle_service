@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	pb "doc_processor/shared_protos"
+	pb "github.com/AndrewK4758/shared_protos"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
