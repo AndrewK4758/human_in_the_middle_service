@@ -5,10 +5,8 @@ RUN apk add --no-cache git
 
 WORKDIR /app
 
-# In order to support the local `replace shared_protos` go.mod directive,
-# we set the Docker build context to the root directory
-COPY shared_protos/ ./shared_protos/
-COPY human_validation_service/ ./human_validation_service/
+COPY --from=shared_protos . /app/shared_protos
+COPY . /app/human_validation_service
 
 WORKDIR /app/human_validation_service
 
