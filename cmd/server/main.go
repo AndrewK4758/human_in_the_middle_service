@@ -19,7 +19,7 @@ func main() {
 
 	port := os.Getenv("PORT")
 	if port == "" {
-		port = "50054" // Using 50054 (AI=50051, Orchestrator=50052, HumanValidation=50054)
+		port = "50056" // Using 50056 (AI=50051, Orchestrator=50052, DocumentProcessing=50054, HumanValidation=50056)
 	}
 
 	listener, err := net.Listen("tcp", ":"+port)
