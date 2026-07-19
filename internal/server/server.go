@@ -54,22 +54,21 @@ func (s *HumanValidationServer) CreateValidationTask(ctx context.Context, req *p
 	}, nil
 }
 
-func (s *HumanValidationServer) GetPendingTasks(ctx context.Context, req *pb.GetPendingTasksRequest) (*pb.GetPendingTasksResponse, error) {
+func (s *HumanValidationServer) GetPendingTasks(req *pb.GetPendingTasksRequest, stream pb.HumanValidationService_GetPendingTasksServer) error {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	var matched []*pb.PendingTask
 	filter := req.GetFilterStatus()
 
 	for _, task := range s.tasks {
 		if filter == "" || task.Status == filter {
-			matched = append(matched, task)
+			if err := stream.Send(task); err != nil {
+				return err
+			}
 		}
 	}
 
-	return &pb.GetPendingTasksResponse{
-		Tasks: matched,
-	}, nil
+	return nil
 }
 
 func (s *HumanValidationServer) SubmitCorrection(ctx context.Context, req *pb.SubmitCorrectionRequest) (*pb.SubmitCorrectionResponse, error) {
