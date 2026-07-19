@@ -14,7 +14,7 @@ func TestHumanValidationServer_CreateAndList(t *testing.T) {
 
 	// 1. Create a task
 	createReq := &pb.CreateTaskRequest{
-		JobId:          "job_test",
+		Identity:       &pb.InfrastructureIdentity{JobId: "job_test"},
 		StepName:       "Classification",
 		FailedAiOutput: `{"classification": ""}`,
 		ExpectedSchema: `{"type": "object", "properties": {"classification": {"type": "string"}}}`,
@@ -49,8 +49,9 @@ func TestHumanValidationServer_CreateAndList(t *testing.T) {
 	if task.GetTaskId() != taskID {
 		t.Errorf("Expected TaskId %s, got %s", taskID, task.GetTaskId())
 	}
-	if task.GetJobId() != "job_test" {
-		t.Errorf("Expected JobId 'job_test', got %s", task.GetJobId())
+	
+	if task.GetIdentity() == nil || task.GetIdentity().GetJobId() != "job_test" {
+		t.Errorf("Expected JobId 'job_test'")
 	}
 	if task.GetStatus() != "PENDING" {
 		t.Errorf("Expected status 'PENDING', got %s", task.GetStatus())

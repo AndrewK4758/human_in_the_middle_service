@@ -35,7 +35,7 @@ func (s *HumanValidationServer) CreateValidationTask(ctx context.Context, req *p
 	taskID := fmt.Sprintf("task_%d", time.Now().UnixNano())
 	task := &pb.PendingTask{
 		TaskId:             taskID,
-		JobId:              req.GetJobId(),
+		Identity:           req.GetIdentity(),
 		StepName:           req.GetStepName(),
 		FailedAiOutput:     req.GetFailedAiOutput(),
 		ExpectedSchema:     req.GetExpectedSchema(),
@@ -46,7 +46,7 @@ func (s *HumanValidationServer) CreateValidationTask(ctx context.Context, req *p
 	}
 
 	s.tasks[taskID] = task
-	log.Printf("INFO: Created human validation task %s for Job: %s", taskID, req.GetJobId())
+	log.Printf("INFO: Created human validation task %s for Job: %s", taskID, req.GetIdentity().GetJobId())
 
 	return &pb.CreateTaskResponse{
 		TaskId: taskID,
@@ -88,7 +88,7 @@ func (s *HumanValidationServer) SubmitCorrection(ctx context.Context, req *pb.Su
 	task.Status = "RESOLVED"
 	s.mu.Unlock()
 
-	log.Printf("INFO: Human submitted correction for task %s, resuming job %s", req.GetTaskId(), task.JobId)
+	log.Printf("INFO: Human submitted correction for task %s, resuming job %s", req.GetTaskId(), task.GetIdentity().GetJobId())
 
 	// Call Orchestrator to ResumeJob
 	conn, err := grpc.NewClient(s.orchestratorAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -99,11 +99,12 @@ func (s *HumanValidationServer) SubmitCorrection(ctx context.Context, req *pb.Su
 
 	orchClient := pb.NewOrchestratorServiceClient(conn)
 	resumeReq := &pb.ResumeJobRequest{
-		JobId:         task.JobId,
+		Identity:      task.GetIdentity(),
 		CorrectedJson: req.GetCorrectedJson(),
+		StepId:        task.GetStepId(),
 	}
 
-	log.Printf("INFO: Sending ResumeJob request to orchestrator for Job: %s", task.JobId)
+	log.Printf("INFO: Sending ResumeJob request to orchestrator for Job: %s", task.GetIdentity().GetJobId())
 	resp, err := orchClient.ResumeJob(ctx, resumeReq)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resume job: %w", err)
