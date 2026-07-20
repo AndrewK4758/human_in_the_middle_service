@@ -84,12 +84,21 @@ func (s *HumanValidationServer) SubmitCorrection(ctx context.Context, req *pb.Su
 		return nil, fmt.Errorf("task %s not found", req.GetTaskId())
 	}
 
+	if task.Status == "RESOLVED" {
+		s.mu.Unlock()
+		log.Printf("INFO: Task %s is already RESOLVED, treating as idempotent success", req.GetTaskId())
+		return &pb.SubmitCorrectionResponse{
+			Success: true,
+			Message: "Job already resumed successfully (idempotent)",
+		}, nil
+	}
+
 	if task.Status != "PENDING" {
 		s.mu.Unlock()
 		return nil, fmt.Errorf("task %s is already %s", req.GetTaskId(), task.Status)
 	}
 
-	task.Status = "RESOLVED"
+	task.Status = "PROCESSING"
 	s.mu.Unlock()
 
 	log.Printf("INFO: Human submitted correction for task %s, resuming job %s", req.GetTaskId(), task.GetIdentity().GetJobId())
@@ -97,6 +106,7 @@ func (s *HumanValidationServer) SubmitCorrection(ctx context.Context, req *pb.Su
 	// Call Orchestrator to ResumeJob
 	conn, err := grpc.NewClient(s.orchestratorAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
+		s.rollbackTaskStatus(task, "PENDING")
 		return nil, fmt.Errorf("failed to connect to orchestrator at %s: %w", s.orchestratorAddr, err)
 	}
 	defer conn.Close()
@@ -111,18 +121,31 @@ func (s *HumanValidationServer) SubmitCorrection(ctx context.Context, req *pb.Su
 	log.Printf("INFO: Sending ResumeJob request to orchestrator for Job: %s", task.GetIdentity().GetJobId())
 	resp, err := orchClient.ResumeJob(ctx, resumeReq)
 	if err != nil {
+		s.rollbackTaskStatus(task, "PENDING")
 		return nil, fmt.Errorf("failed to resume job: %w", err)
 	}
 
 	if !resp.Success {
+		s.rollbackTaskStatus(task, "PENDING")
 		return &pb.SubmitCorrectionResponse{
 			Success: false,
 			Message: fmt.Sprintf("Orchestrator failed to resume job: %s", resp.Message),
 		}, nil
 	}
 
+	s.mu.Lock()
+	task.Status = "RESOLVED"
+	s.mu.Unlock()
+
 	return &pb.SubmitCorrectionResponse{
 		Success: true,
 		Message: "Job resumed successfully",
 	}, nil
+}
+
+func (s *HumanValidationServer) rollbackTaskStatus(task *pb.PendingTask, status string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	log.Printf("INFO: Rolling back task %s to %s due to Orchestrator failure", task.GetTaskId(), status)
+	task.Status = status
 }
