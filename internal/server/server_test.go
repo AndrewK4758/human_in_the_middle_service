@@ -112,3 +112,90 @@ func TestHumanValidationServer_DeleteTask(t *testing.T) {
 		t.Fatalf("Expected error when deleting non-existent task")
 	}
 }
+
+func TestHumanValidationServer_CreateValidationTask_Idempotency(t *testing.T) {
+	s := NewHumanValidationServer("localhost:50052")
+	ctx := context.Background()
+
+	tests := []struct {
+		name          string
+		jobId         string
+		stepId        string
+		useIdentity   bool
+		expectedStat  string
+		expectedCount int
+	}{
+		{
+			name:          "Happy Path (First Call)",
+			jobId:         "job_123",
+			stepId:        "step_A",
+			useIdentity:   true,
+			expectedStat:  "CREATED",
+			expectedCount: 1,
+		},
+		{
+			name:          "Idempotency (Exact Duplicate)",
+			jobId:         "job_123",
+			stepId:        "step_A",
+			useIdentity:   true,
+			expectedStat:  "EXISTS",
+			expectedCount: 1,
+		},
+		{
+			name:          "Edge Case (Different Step)",
+			jobId:         "job_123",
+			stepId:        "step_B",
+			useIdentity:   true,
+			expectedStat:  "CREATED",
+			expectedCount: 2,
+		},
+		{
+			name:          "Edge Case (Different Job)",
+			jobId:         "job_456",
+			stepId:        "step_A",
+			useIdentity:   true,
+			expectedStat:  "CREATED",
+			expectedCount: 3,
+		},
+		{
+			name:          "Edge Case (Legacy/Null Identity)",
+			useIdentity:   false,
+			expectedStat:  "CREATED",
+			expectedCount: 4,
+		},
+	}
+
+	var firstTaskId string
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := &pb.CreateTaskRequest{
+				StepId: tt.stepId,
+			}
+			if tt.useIdentity {
+				req.Identity = &pb.InfrastructureIdentity{JobId: tt.jobId}
+			}
+
+			resp, err := s.CreateValidationTask(ctx, req)
+			if err != nil {
+				t.Fatalf("Failed to create task: %v", err)
+			}
+
+			if resp.Status != tt.expectedStat {
+				t.Errorf("Expected status %s, got %s", tt.expectedStat, resp.Status)
+			}
+
+			if tt.name == "Happy Path (First Call)" {
+				firstTaskId = resp.TaskId
+			} else if tt.name == "Idempotency (Exact Duplicate)" {
+				if resp.TaskId != firstTaskId {
+					t.Errorf("Expected returned TaskId to match first call, got %s", resp.TaskId)
+				}
+			}
+
+			if len(s.tasks) != tt.expectedCount {
+				t.Errorf("Expected map size %d, got %d", tt.expectedCount, len(s.tasks))
+			}
+		})
+	}
+}

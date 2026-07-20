@@ -13,6 +13,14 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 )
 
+const (
+	TaskStatusPending    = "PENDING"
+	TaskStatusProcessing = "PROCESSING"
+	TaskStatusResolved   = "RESOLVED"
+	TaskStatusCreated    = "CREATED"
+	TaskStatusExists     = "EXISTS"
+)
+
 type HumanValidationServer struct {
 	pb.UnimplementedHumanValidationServiceServer
 
@@ -32,6 +40,22 @@ func (s *HumanValidationServer) CreateValidationTask(ctx context.Context, req *p
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// Idempotency check: if a task already exists for this JobId, TenantId, AppId, and StepId, return it.
+	for _, t := range s.tasks {
+		if t.Identity != nil && req.GetIdentity() != nil {
+			if t.Identity.GetJobId() == req.GetIdentity().GetJobId() &&
+				t.Identity.GetTenantId() == req.GetIdentity().GetTenantId() &&
+				t.Identity.GetAppId() == req.GetIdentity().GetAppId() &&
+				t.GetStepId() == req.GetStepId() {
+				log.Printf("INFO: Idempotent CreateValidationTask: returning existing task %s for Job: %s", t.TaskId, req.GetIdentity().GetJobId())
+				return &pb.CreateTaskResponse{
+					TaskId: t.TaskId,
+					Status: TaskStatusExists,
+				}, nil
+			}
+		}
+	}
+
 	taskID := fmt.Sprintf("task_%d", time.Now().UnixNano())
 	task := &pb.PendingTask{
 		TaskId:             taskID,
@@ -42,7 +66,7 @@ func (s *HumanValidationServer) CreateValidationTask(ctx context.Context, req *p
 		PromptInstructions: req.GetPromptInstructions(),
 		ErrorMessage:       req.GetErrorMessage(),
 		TargetFields:       req.GetTargetFields(),
-		Status:             "PENDING",
+		Status:             TaskStatusPending,
 		GlobalStateJson:    req.GetGlobalStateJson(),
 		JobName:            req.GetJobName(),
 		StepId:             req.GetStepId(),
@@ -55,7 +79,7 @@ func (s *HumanValidationServer) CreateValidationTask(ctx context.Context, req *p
 
 	return &pb.CreateTaskResponse{
 		TaskId: taskID,
-		Status: "CREATED",
+		Status: TaskStatusCreated,
 	}, nil
 }
 
@@ -68,7 +92,7 @@ func (s *HumanValidationServer) GetPendingTasks(req *pb.GetPendingTasksRequest, 
 	for _, task := range s.tasks {
 		if filter == "" || task.Status == filter {
 			if err := stream.Send(task); err != nil {
-				return err
+				return fmt.Errorf("failed to stream pending task %s: %w", task.TaskId, err)
 			}
 		}
 	}
@@ -84,7 +108,7 @@ func (s *HumanValidationServer) SubmitCorrection(ctx context.Context, req *pb.Su
 		return nil, fmt.Errorf("task %s not found", req.GetTaskId())
 	}
 
-	if task.Status == "RESOLVED" {
+	if task.Status == TaskStatusResolved {
 		s.mu.Unlock()
 		log.Printf("INFO: Task %s is already RESOLVED, treating as idempotent success", req.GetTaskId())
 		return &pb.SubmitCorrectionResponse{
@@ -93,12 +117,12 @@ func (s *HumanValidationServer) SubmitCorrection(ctx context.Context, req *pb.Su
 		}, nil
 	}
 
-	if task.Status != "PENDING" {
+	if task.Status != TaskStatusPending {
 		s.mu.Unlock()
 		return nil, fmt.Errorf("task %s is already %s", req.GetTaskId(), task.Status)
 	}
 
-	task.Status = "PROCESSING"
+	task.Status = TaskStatusProcessing
 	s.mu.Unlock()
 
 	log.Printf("INFO: Human submitted correction for task %s, resuming job %s", req.GetTaskId(), task.GetIdentity().GetJobId())
@@ -106,7 +130,7 @@ func (s *HumanValidationServer) SubmitCorrection(ctx context.Context, req *pb.Su
 	// Call Orchestrator to ResumeJob
 	conn, err := grpc.NewClient(s.orchestratorAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
-		s.rollbackTaskStatus(task, "PENDING")
+		s.rollbackTaskStatus(task, TaskStatusPending)
 		return nil, fmt.Errorf("failed to connect to orchestrator at %s: %w", s.orchestratorAddr, err)
 	}
 	defer conn.Close()
@@ -121,12 +145,12 @@ func (s *HumanValidationServer) SubmitCorrection(ctx context.Context, req *pb.Su
 	log.Printf("INFO: Sending ResumeJob request to orchestrator for Job: %s", task.GetIdentity().GetJobId())
 	resp, err := orchClient.ResumeJob(ctx, resumeReq)
 	if err != nil {
-		s.rollbackTaskStatus(task, "PENDING")
+		s.rollbackTaskStatus(task, TaskStatusPending)
 		return nil, fmt.Errorf("failed to resume job: %w", err)
 	}
 
 	if !resp.Success {
-		s.rollbackTaskStatus(task, "PENDING")
+		s.rollbackTaskStatus(task, TaskStatusPending)
 		return &pb.SubmitCorrectionResponse{
 			Success: false,
 			Message: fmt.Sprintf("Orchestrator failed to resume job: %s", resp.Message),
@@ -134,7 +158,7 @@ func (s *HumanValidationServer) SubmitCorrection(ctx context.Context, req *pb.Su
 	}
 
 	s.mu.Lock()
-	task.Status = "RESOLVED"
+	task.Status = TaskStatusResolved
 	s.mu.Unlock()
 
 	return &pb.SubmitCorrectionResponse{
