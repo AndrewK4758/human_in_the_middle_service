@@ -43,6 +43,11 @@ func (s *HumanValidationServer) CreateValidationTask(ctx context.Context, req *p
 		ErrorMessage:       req.GetErrorMessage(),
 		TargetFields:       req.GetTargetFields(),
 		Status:             "PENDING",
+		GlobalStateJson:    req.GetGlobalStateJson(),
+		JobName:            req.GetJobName(),
+		StepId:             req.GetStepId(),
+		StepContextInput:   req.GetStepContextInput(),
+		Metadata:           req.GetMetadata(),
 	}
 
 	s.tasks[taskID] = task
