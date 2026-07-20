@@ -143,6 +143,24 @@ func (s *HumanValidationServer) SubmitCorrection(ctx context.Context, req *pb.Su
 	}, nil
 }
 
+func (s *HumanValidationServer) DeleteTask(ctx context.Context, req *pb.DeleteTaskRequest) (*pb.DeleteTaskResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	taskID := req.GetTaskId()
+	_, exists := s.tasks[taskID]
+	if !exists {
+		return nil, fmt.Errorf("task %s not found", taskID)
+	}
+
+	delete(s.tasks, taskID)
+	log.Printf("INFO: Deleted human validation task %s", taskID)
+
+	return &pb.DeleteTaskResponse{
+		Success: true,
+	}, nil
+}
+
 func (s *HumanValidationServer) rollbackTaskStatus(task *pb.PendingTask, status string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

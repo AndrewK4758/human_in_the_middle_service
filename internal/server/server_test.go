@@ -71,3 +71,44 @@ func (m *mockGetPendingTasksServer) Send(task *pb.PendingTask) error {
 	return nil
 }
 
+func TestHumanValidationServer_DeleteTask(t *testing.T) {
+	s := NewHumanValidationServer("localhost:50052")
+	ctx := context.Background()
+
+	// 1. Create a task
+	createReq := &pb.CreateTaskRequest{
+		Identity:       &pb.InfrastructureIdentity{JobId: "job_test_delete"},
+	}
+
+	createResp, err := s.CreateValidationTask(ctx, createReq)
+	if err != nil {
+		t.Fatalf("Failed to create task: %v", err)
+	}
+
+	taskID := createResp.GetTaskId()
+
+	// 2. Delete the task
+	delReq := &pb.DeleteTaskRequest{
+		TaskId: taskID,
+	}
+
+	delResp, err := s.DeleteTask(ctx, delReq)
+	if err != nil {
+		t.Fatalf("Failed to delete task: %v", err)
+	}
+
+	if !delResp.GetSuccess() {
+		t.Fatalf("Expected success to be true")
+	}
+
+	// 3. Verify it's deleted
+	if _, exists := s.tasks[taskID]; exists {
+		t.Fatalf("Expected task to be deleted from map")
+	}
+
+	// 4. Try to delete non-existent task
+	_, err = s.DeleteTask(ctx, &pb.DeleteTaskRequest{TaskId: "non_existent"})
+	if err == nil {
+		t.Fatalf("Expected error when deleting non-existent task")
+	}
+}
