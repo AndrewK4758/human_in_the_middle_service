@@ -62,7 +62,6 @@ func (s *HumanValidationServer) CreateValidationTask(ctx context.Context, req *p
 		Identity:           req.GetIdentity(),
 		StepName:           req.GetStepName(),
 		FailedAiOutput:     req.GetFailedAiOutput(),
-		ExpectedSchema:     req.GetExpectedSchema(),
 		PromptInstructions: req.GetPromptInstructions(),
 		ErrorMessage:       req.GetErrorMessage(),
 		TargetFields:       req.GetTargetFields(),
