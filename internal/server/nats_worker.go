@@ -3,14 +3,16 @@ package server
 import (
 	"context"
 	"fmt"
-	"log"
 	"time"
 
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/structpb"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	pb "github.com/AndrewK4758/shared_protos"
+	"github.com/AndrewK4758/shared_utils/logger"
 )
 
 type NatsServer struct {
@@ -31,26 +33,26 @@ func (s *NatsServer) Start(ctx context.Context) error {
 	if err != nil {
 		_, err = s.js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
 			Name:     streamName,
-			Subjects: []string{ "worker.human.validation", "worker.human.validation.>" },
+			Subjects: []string{"worker.human.validation", "worker.human.validation.>"},
 		})
 		if err != nil {
 			return fmt.Errorf("failed to create JetStream stream: %w", err)
 		}
-		log.Printf("Successfully created JetStream stream: %s", streamName)
+		logger.Info("HumanValidation", "Successfully created JetStream stream: %s", streamName)
 	}
 
 	cons, err := s.js.CreateOrUpdateConsumer(ctx, streamName, jetstream.ConsumerConfig{
-		Durable:       "human_validation_workers",
-		AckPolicy:     jetstream.AckExplicitPolicy,
+		Durable:        "human_validation_workers",
+		AckPolicy:      jetstream.AckExplicitPolicy,
 		FilterSubjects: []string{"worker.human.validation", "worker.human.validation.>"},
-		MaxAckPending: 10,
-		AckWait:       1 * time.Minute,
+		MaxAckPending:  10,
+		AckWait:        1 * time.Minute,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create JetStream consumer: %w", err)
 	}
 
-	log.Printf("Starting Human Validation NATS consumer...")
+	logger.Info("HumanValidation", "Starting Human Validation NATS consumer...")
 	cc, err := cons.Consume(func(msg jetstream.Msg) {
 		s.processMessage(ctx, msg)
 	})
@@ -64,7 +66,7 @@ func (s *NatsServer) Start(ctx context.Context) error {
 }
 
 func (s *NatsServer) processMessage(ctx context.Context, msg jetstream.Msg) {
-	log.Printf("Received human validation request on subject: %s", msg.Subject())
+	logger.Info("HumanValidation", "Received human validation request on subject: %s", msg.Subject())
 
 	var replySubj string
 	if headers := msg.Headers(); headers != nil {
@@ -72,22 +74,39 @@ func (s *NatsServer) processMessage(ctx context.Context, msg jetstream.Msg) {
 	}
 
 	if replySubj != "" {
+		payloadStruct, _ := structpb.NewStruct(map[string]interface{}{
+			"detail": "Explicit human validation requested by workflow node",
+		})
+		
 		resp := &pb.PerformActionResponse{
 			Success:          false,
 			IsTransientError: false,
-			ErrorMessage:     "pending human validation",
+			ErrorContract: &pb.ErrorContract{
+				Code:          "HUMAN_VALIDATION_REQUIRED",
+				Source:        "human_validation_service",
+				Message:       "pending human validation",
+				Timestamp:     timestamppb.Now(),
+				ClientPayload: payloadStruct,
+			},
 		}
-		respBytes, _ := proto.Marshal(resp)
+
+		respBytes, err := proto.Marshal(resp)
+		if err != nil {
+			logger.Info("HumanValidation", "Failed to marshal response: %v", err)
+			msg.NakWithDelay(5 * time.Second)
+			return
+		}
+		
 		if _, err := s.js.Publish(ctx, replySubj, respBytes); err != nil {
-			log.Printf("Failed to publish reply to NATS %s: %v", replySubj, err)
+			logger.Info("HumanValidation", "Failed to publish reply to NATS %s: %v", replySubj, err)
 			msg.NakWithDelay(5 * time.Second)
 			return
 		}
 	}
 
 	if err := msg.Ack(); err != nil {
-		log.Printf("Failed to ack msg: %v", err)
+		logger.Info("HumanValidation", "Failed to ack msg: %v", err)
 	} else {
-		log.Printf("Successfully acknowledged human validation request and replied to %s", replySubj)
+		logger.Info("HumanValidation", "Successfully acknowledged human validation request and replied to %s", replySubj)
 	}
 }

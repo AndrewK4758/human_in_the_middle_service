@@ -3,11 +3,11 @@ package server
 import (
 	"context"
 	"fmt"
-	"log"
 	"sync"
 	"time"
 
 	pb "github.com/AndrewK4758/shared_protos"
+	"github.com/AndrewK4758/shared_utils/logger"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -47,7 +47,7 @@ func (s *HumanValidationServer) CreateValidationTask(ctx context.Context, req *p
 				t.Identity.GetTenantId() == req.GetIdentity().GetTenantId() &&
 				t.Identity.GetAppId() == req.GetIdentity().GetAppId() &&
 				t.GetStepId() == req.GetStepId() {
-				log.Printf("INFO: Idempotent CreateValidationTask: returning existing task %s for Job: %s", t.TaskId, req.GetIdentity().GetJobId())
+				logger.Info("HumanValidation", "INFO: Idempotent CreateValidationTask: returning existing task %s for Job: %s", t.TaskId, req.GetIdentity().GetJobId())
 				return &pb.CreateTaskResponse{
 					TaskId: t.TaskId,
 					Status: TaskStatusExists,
@@ -73,7 +73,7 @@ func (s *HumanValidationServer) CreateValidationTask(ctx context.Context, req *p
 	}
 
 	s.tasks[taskID] = task
-	log.Printf("INFO: Created human validation task %s for Job: %s", taskID, req.GetIdentity().GetJobId())
+	logger.Info("HumanValidation", "INFO: Created human validation task %s for Job: %s", taskID, req.GetIdentity().GetJobId())
 
 	return &pb.CreateTaskResponse{
 		TaskId: taskID,
@@ -108,7 +108,7 @@ func (s *HumanValidationServer) SubmitCorrection(ctx context.Context, req *pb.Su
 
 	if task.Status == TaskStatusResolved {
 		s.mu.Unlock()
-		log.Printf("INFO: Task %s is already RESOLVED, treating as idempotent success", req.GetTaskId())
+		logger.Info("HumanValidation", "INFO: Task %s is already RESOLVED, treating as idempotent success", req.GetTaskId())
 		return &pb.SubmitCorrectionResponse{
 			Success: true,
 			Message: "Job already resumed successfully (idempotent)",
@@ -123,7 +123,7 @@ func (s *HumanValidationServer) SubmitCorrection(ctx context.Context, req *pb.Su
 	task.Status = TaskStatusProcessing
 	s.mu.Unlock()
 
-	log.Printf("INFO: Human submitted correction for task %s, resuming job %s", req.GetTaskId(), task.GetIdentity().GetJobId())
+	logger.Info("HumanValidation", "INFO: Human submitted correction for task %s, resuming job %s", req.GetTaskId(), task.GetIdentity().GetJobId())
 
 	// Call Orchestrator to ResumeJob
 	conn, err := grpc.NewClient(s.orchestratorAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -140,7 +140,7 @@ func (s *HumanValidationServer) SubmitCorrection(ctx context.Context, req *pb.Su
 		StepId:        task.GetStepId(),
 	}
 
-	log.Printf("INFO: Sending ResumeJob request to orchestrator for Job: %s", task.GetIdentity().GetJobId())
+	logger.Info("HumanValidation", "INFO: Sending ResumeJob request to orchestrator for Job: %s", task.GetIdentity().GetJobId())
 	resp, err := orchClient.ResumeJob(ctx, resumeReq)
 	if err != nil {
 		s.rollbackTaskStatus(task, TaskStatusPending)
@@ -176,7 +176,7 @@ func (s *HumanValidationServer) DeleteTask(ctx context.Context, req *pb.DeleteTa
 	}
 
 	delete(s.tasks, taskID)
-	log.Printf("INFO: Deleted human validation task %s", taskID)
+	logger.Info("HumanValidation", "INFO: Deleted human validation task %s", taskID)
 
 	return &pb.DeleteTaskResponse{
 		Success: true,
@@ -186,6 +186,6 @@ func (s *HumanValidationServer) DeleteTask(ctx context.Context, req *pb.DeleteTa
 func (s *HumanValidationServer) rollbackTaskStatus(task *pb.PendingTask, status string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	log.Printf("INFO: Rolling back task %s to %s due to Orchestrator failure", task.GetTaskId(), status)
+	logger.Info("HumanValidation", "INFO: Rolling back task %s to %s due to Orchestrator failure", task.GetTaskId(), status)
 	task.Status = status
 }

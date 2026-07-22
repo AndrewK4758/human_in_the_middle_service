@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"log"
 	"net"
 	"os"
 
@@ -15,7 +14,6 @@ import (
 	"google.golang.org/grpc/reflection"
 
 	"human_validation_service/internal/server"
-	"human_validation_service/internal/worker"
 
 	pb "github.com/AndrewK4758/shared_protos"
 )
@@ -31,13 +29,13 @@ func main() {
 	}
 	nc, err := nats.Connect(natsURL)
 	if err != nil {
-		log.Fatalf("Failed to connect to NATS: %v", err)
+		logger.Fatal("HumanValidation", "Failed to connect to NATS: %v", err)
 	}
 	defer nc.Close()
 
 	js, err := jetstream.New(nc)
 	if err != nil {
-		log.Fatalf("Failed to init JetStream: %v", err)
+		logger.Fatal("HumanValidation", "Failed to init JetStream: %v", err)
 	}
 
 	natsServer := server.NewNatsServer(nc, js)
@@ -46,7 +44,7 @@ func main() {
 
 	go func() {
 		if err := natsServer.Start(ctx); err != nil {
-			log.Fatalf("NATS Server failed: %v", err)
+			logger.Fatal("HumanValidation", "NATS Server failed: %v", err)
 		}
 	}()
 
@@ -57,7 +55,7 @@ func main() {
 
 	listener, err := net.Listen("tcp", ":"+port)
 	if err != nil {
-		log.Fatalf("Failed to listen on port %s: %v", port, err)
+		logger.Fatal("HumanValidation", "Failed to listen on port %s: %v", port, err)
 	}
 
 	orchestratorAddr := os.Getenv("ORCHESTRATOR_ADDRESS")
@@ -74,23 +72,9 @@ func main() {
 	// Register reflection service on gRPC server so clients can query it
 	reflection.Register(grpcServer)
 
-	// Start the NATS worker
-	worker, err := worker.NewWorker()
-	if err != nil {
-		log.Fatalf("Failed to create worker: %v", err)
-	}
-	defer worker.Close()
-
-	go func() {
-		log.Printf("Starting JetStream Human Validation Worker...")
-		if err := worker.Start(context.Background()); err != nil {
-			log.Fatalf("Worker failed: %v", err)
-		}
-	}()
-
-	log.Printf("Human Validation Service starting on port %s...", port)
-	log.Printf("Configured Orchestrator Address: %s", orchestratorAddr)
+	logger.Info("HumanValidation", "Human Validation Service starting on port %s...", port)
+	logger.Info("HumanValidation", "Configured Orchestrator Address: %s", orchestratorAddr)
 	if err := grpcServer.Serve(listener); err != nil {
-		log.Fatalf("Failed to serve gRPC server: %v", err)
+		logger.Fatal("HumanValidation", "Failed to serve gRPC server: %v", err)
 	}
 }
