@@ -18,7 +18,6 @@ func TestHumanValidationServer_CreateAndList(t *testing.T) {
 		Identity:       &pb.InfrastructureIdentity{JobId: "job_test"},
 		StepName:       "Classification",
 		FailedAiOutput: `{"classification": ""}`,
-		ExpectedSchema: `{"type": "object", "properties": {"classification": {"type": "string"}}}`,
 		ErrorMessage:   "expected field is empty: classification",
 	}
 

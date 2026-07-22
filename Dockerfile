@@ -6,12 +6,16 @@ RUN apk add --no-cache git
 WORKDIR /app
 
 COPY --from=shared_protos . /app/shared_protos
+COPY --from=shared_utils . /app/shared_utils
+COPY --from=shared_logger . /app/shared_logger
 COPY . /app/human_validation_service
 
 WORKDIR /app/human_validation_service
 
 # Add local replace directive
 RUN go mod edit -replace github.com/AndrewK4758/shared_protos=../shared_protos
+RUN go mod edit -replace github.com/AndrewK4758/shared_utils=../shared_utils
+RUN go mod edit -replace github.com/AndrewK4758/shared_logger=../shared_logger
 
 # Download dependencies
 RUN go mod download
