@@ -28,28 +28,26 @@ func NewNatsServer(nc *nats.Conn, js jetstream.JetStream) *NatsServer {
 }
 
 func (s *NatsServer) Start(ctx context.Context) error {
-	streamName := "HUMAN_VALIDATION"
-	_, err := s.js.Stream(ctx, streamName)
-	if err != nil {
-		_, err = s.js.CreateOrUpdateStream(ctx, jetstream.StreamConfig{
-			Name:     streamName,
-			Subjects: []string{"worker.human.validation", "worker.human.validation.>"},
-		})
-		if err != nil {
-			return fmt.Errorf("failed to create JetStream stream: %w", err)
-		}
-		logger.Info("HumanValidation", "Successfully created JetStream stream: %s", streamName)
-	}
+	streamName := "WORKERS"
 
-	cons, err := s.js.CreateOrUpdateConsumer(ctx, streamName, jetstream.ConsumerConfig{
-		Durable:        "human_validation_workers",
-		AckPolicy:      jetstream.AckExplicitPolicy,
-		FilterSubjects: []string{"worker.human.validation", "worker.human.validation.>"},
-		MaxAckPending:  10,
-		AckWait:        1 * time.Minute,
-	})
+	var cons jetstream.Consumer
+	var err error
+	for i := 0; i < 30; i++ {
+		cons, err = s.js.CreateOrUpdateConsumer(ctx, streamName, jetstream.ConsumerConfig{
+			Durable:        "human_validation_workers",
+			AckPolicy:      jetstream.AckExplicitPolicy,
+			FilterSubjects: []string{"worker.human.validation", "worker.human.validation.>"},
+			MaxAckPending:  10,
+			AckWait:        1 * time.Minute,
+		})
+		if err == nil {
+			break
+		}
+		logger.Info("HumanValidation", "Waiting for stream %s to be created... (%v)", streamName, err)
+		time.Sleep(2 * time.Second)
+	}
 	if err != nil {
-		return fmt.Errorf("failed to create JetStream consumer: %w", err)
+		return fmt.Errorf("failed to create JetStream consumer after retries: %w", err)
 	}
 
 	logger.Info("HumanValidation", "Starting Human Validation NATS consumer...")
