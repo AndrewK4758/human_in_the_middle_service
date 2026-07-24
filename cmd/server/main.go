@@ -19,9 +19,9 @@ import (
 )
 
 func main() {
-	logger.InitLogger()
 	// Attempt to load .env, ignore error if it doesn't exist
 	envutil.LoadEnv(".env", "human_validation_service/.env", "../.env", "../../.env")
+	logger.InitLogger()
 
 	natsURL := envutil.GetStringOrDefault("NATS_URL", "")
 	if natsURL == "" {
