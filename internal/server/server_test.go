@@ -51,7 +51,6 @@ func TestHumanValidationServer_CreateAndList(t *testing.T) {
 		t.Errorf("Expected TaskId %s, got %s", taskID, task.GetTaskId())
 	}
 
-	
 	if task.GetIdentity() == nil || task.GetIdentity().GetJobId() != "job_test" {
 		t.Errorf("Expected JobId 'job_test'")
 	}
@@ -76,7 +75,7 @@ func TestHumanValidationServer_DeleteTask(t *testing.T) {
 
 	// 1. Create a task
 	createReq := &pb.CreateTaskRequest{
-		Identity:       &pb.InfrastructureIdentity{JobId: "job_test_delete"},
+		Identity: &pb.InfrastructureIdentity{JobId: "job_test_delete"},
 	}
 
 	createResp, err := s.CreateValidationTask(ctx, createReq)

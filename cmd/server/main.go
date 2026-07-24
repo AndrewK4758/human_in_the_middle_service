@@ -3,12 +3,12 @@ package main
 import (
 	"context"
 	"net"
-	"os"
+
+	"github.com/AndrewK4758/shared_utils/envutil"
 
 	"github.com/AndrewK4758/shared_utils/logger"
+	"github.com/AndrewK4758/shared_utils/natsutil"
 
-	"github.com/joho/godotenv"
-	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection"
@@ -21,13 +21,13 @@ import (
 func main() {
 	logger.InitLogger()
 	// Attempt to load .env, ignore error if it doesn't exist
-	_ = godotenv.Load()
+	envutil.LoadEnv(".env", "human_validation_service/.env", "../.env", "../../.env")
 
-	natsURL := os.Getenv("NATS_URL")
+	natsURL := envutil.GetStringOrDefault("NATS_URL", "")
 	if natsURL == "" {
 		natsURL = "nats://localhost:4222"
 	}
-	nc, err := nats.Connect(natsURL)
+	nc, err := natsutil.ConnectWithRetries(natsURL, "HumanValidation")
 	if err != nil {
 		logger.Fatal("HumanValidation", "Failed to connect to NATS: %v", err)
 	}
@@ -48,7 +48,7 @@ func main() {
 		}
 	}()
 
-	port := os.Getenv("PORT")
+	port := envutil.GetStringOrDefault("PORT", "")
 	if port == "" {
 		port = "50056" // Using 50056
 	}
@@ -58,7 +58,7 @@ func main() {
 		logger.Fatal("HumanValidation", "Failed to listen on port %s: %v", port, err)
 	}
 
-	orchestratorAddr := os.Getenv("ORCHESTRATOR_ADDRESS")
+	orchestratorAddr := envutil.GetStringOrDefault("ORCHESTRATOR_ADDRESS", "")
 	if orchestratorAddr == "" {
 		orchestratorAddr = "localhost:50052"
 	}
