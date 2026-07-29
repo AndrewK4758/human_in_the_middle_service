@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"fmt"
+	"net"
 	"testing"
 
 	pb "github.com/AndrewK4758/shared_protos"
@@ -196,4 +198,207 @@ func TestHumanValidationServer_CreateValidationTask_Idempotency(t *testing.T) {
 			}
 		})
 	}
+}
+
+type mockOrchestratorServer struct {
+	pb.UnimplementedOrchestratorServiceServer
+	resumeJobFunc func(ctx context.Context, req *pb.ResumeJobRequest) (*pb.ResumeJobResponse, error)
+}
+
+func (m *mockOrchestratorServer) ResumeJob(ctx context.Context, req *pb.ResumeJobRequest) (*pb.ResumeJobResponse, error) {
+	if m.resumeJobFunc != nil {
+		return m.resumeJobFunc(ctx, req)
+	}
+	return &pb.ResumeJobResponse{Success: true, Message: "resumed successfully"}, nil
+}
+
+func startMockOrchestrator(t *testing.T, mock *mockOrchestratorServer) (string, func()) {
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Failed to listen for mock orchestrator: %v", err)
+	}
+
+	grpcServer := grpc.NewServer()
+	pb.RegisterOrchestratorServiceServer(grpcServer, mock)
+
+	go func() {
+		_ = grpcServer.Serve(lis)
+	}()
+
+	cleanup := func() {
+		grpcServer.Stop()
+		lis.Close()
+	}
+
+	return lis.Addr().String(), cleanup
+}
+
+func TestHumanValidationServer_SubmitCorrection(t *testing.T) {
+	mockOrch := &mockOrchestratorServer{}
+	addr, cleanup := startMockOrchestrator(t, mockOrch)
+	defer cleanup()
+
+	s := NewHumanValidationServer(addr)
+	ctx := context.Background()
+
+	t.Run("Task Not Found Error Handling", func(t *testing.T) {
+		_, err := s.SubmitCorrection(ctx, &pb.SubmitCorrectionRequest{
+			TaskId:        "task_non_existent",
+			CorrectedJson: `{"status":"ok"}`,
+		})
+		if err == nil {
+			t.Fatalf("Expected error when submitting correction for non-existent task")
+		}
+	})
+
+	t.Run("Task Invalid Status (Processing)", func(t *testing.T) {
+		createResp, err := s.CreateValidationTask(ctx, &pb.CreateTaskRequest{
+			Identity: &pb.InfrastructureIdentity{JobId: "job_processing"},
+			StepId:   "step_proc",
+		})
+		if err != nil {
+			t.Fatalf("Failed to create task: %v", err)
+		}
+		taskId := createResp.GetTaskId()
+
+		s.mu.Lock()
+		s.tasks[taskId].Status = TaskStatusProcessing
+		s.mu.Unlock()
+
+		_, err = s.SubmitCorrection(ctx, &pb.SubmitCorrectionRequest{
+			TaskId:        taskId,
+			CorrectedJson: `{"status":"ok"}`,
+		})
+		if err == nil {
+			t.Fatalf("Expected error when submitting correction for task in PROCESSING status")
+		}
+	})
+
+	t.Run("Orchestrator ResumeJob Success -> Status Resolved", func(t *testing.T) {
+		mockOrch.resumeJobFunc = func(ctx context.Context, req *pb.ResumeJobRequest) (*pb.ResumeJobResponse, error) {
+			if req.GetStepId() != "step_succ" {
+				return nil, fmt.Errorf("unexpected step id %s", req.GetStepId())
+			}
+			return &pb.ResumeJobResponse{Success: true, Message: "Job resumed"}, nil
+		}
+
+		createResp, err := s.CreateValidationTask(ctx, &pb.CreateTaskRequest{
+			Identity: &pb.InfrastructureIdentity{JobId: "job_succ"},
+			StepId:   "step_succ",
+		})
+		if err != nil {
+			t.Fatalf("Failed to create task: %v", err)
+		}
+		taskId := createResp.GetTaskId()
+
+		resp, err := s.SubmitCorrection(ctx, &pb.SubmitCorrectionRequest{
+			TaskId:        taskId,
+			CorrectedJson: `{"corrected": true}`,
+		})
+		if err != nil {
+			t.Fatalf("Failed to submit correction: %v", err)
+		}
+		if !resp.GetSuccess() {
+			t.Fatalf("Expected response success true, got false")
+		}
+
+		s.mu.RLock()
+		task := s.tasks[taskId]
+		s.mu.RUnlock()
+
+		if task.Status != TaskStatusResolved {
+			t.Fatalf("Expected task status %s, got %s", TaskStatusResolved, task.Status)
+		}
+	})
+
+	t.Run("Task Already Resolved (Idempotence)", func(t *testing.T) {
+		createResp, err := s.CreateValidationTask(ctx, &pb.CreateTaskRequest{
+			Identity: &pb.InfrastructureIdentity{JobId: "job_already_resolved"},
+			StepId:   "step_res",
+		})
+		if err != nil {
+			t.Fatalf("Failed to create task: %v", err)
+		}
+		taskId := createResp.GetTaskId()
+
+		s.mu.Lock()
+		s.tasks[taskId].Status = TaskStatusResolved
+		s.mu.Unlock()
+
+		resp, err := s.SubmitCorrection(ctx, &pb.SubmitCorrectionRequest{
+			TaskId:        taskId,
+			CorrectedJson: `{"corrected": true}`,
+		})
+		if err != nil {
+			t.Fatalf("Unexpected error for already resolved task: %v", err)
+		}
+		if !resp.GetSuccess() {
+			t.Fatalf("Expected success for already resolved task")
+		}
+	})
+
+	t.Run("Orchestrator ResumeJob Failure (gRPC Error) -> Task Status Rollback to Pending", func(t *testing.T) {
+		mockOrch.resumeJobFunc = func(ctx context.Context, req *pb.ResumeJobRequest) (*pb.ResumeJobResponse, error) {
+			return nil, fmt.Errorf("orchestrator connection timeout")
+		}
+
+		createResp, err := s.CreateValidationTask(ctx, &pb.CreateTaskRequest{
+			Identity: &pb.InfrastructureIdentity{JobId: "job_fail_grpc"},
+			StepId:   "step_fail_grpc",
+		})
+		if err != nil {
+			t.Fatalf("Failed to create task: %v", err)
+		}
+		taskId := createResp.GetTaskId()
+
+		_, err = s.SubmitCorrection(ctx, &pb.SubmitCorrectionRequest{
+			TaskId:        taskId,
+			CorrectedJson: `{"corrected": true}`,
+		})
+		if err == nil {
+			t.Fatalf("Expected error when orchestrator ResumeJob returns error")
+		}
+
+		s.mu.RLock()
+		task := s.tasks[taskId]
+		s.mu.RUnlock()
+
+		if task.Status != TaskStatusPending {
+			t.Fatalf("Expected status rolled back to %s, got %s", TaskStatusPending, task.Status)
+		}
+	})
+
+	t.Run("Orchestrator ResumeJob Failure (Success=false) -> Task Status Rollback to Pending", func(t *testing.T) {
+		mockOrch.resumeJobFunc = func(ctx context.Context, req *pb.ResumeJobRequest) (*pb.ResumeJobResponse, error) {
+			return &pb.ResumeJobResponse{Success: false, Message: "validation invalid"}, nil
+		}
+
+		createResp, err := s.CreateValidationTask(ctx, &pb.CreateTaskRequest{
+			Identity: &pb.InfrastructureIdentity{JobId: "job_fail_resp"},
+			StepId:   "step_fail_resp",
+		})
+		if err != nil {
+			t.Fatalf("Failed to create task: %v", err)
+		}
+		taskId := createResp.GetTaskId()
+
+		resp, err := s.SubmitCorrection(ctx, &pb.SubmitCorrectionRequest{
+			TaskId:        taskId,
+			CorrectedJson: `{"corrected": true}`,
+		})
+		if err != nil {
+			t.Fatalf("Unexpected error: %v", err)
+		}
+		if resp.GetSuccess() {
+			t.Fatalf("Expected response success to be false when orchestrator fails")
+		}
+
+		s.mu.RLock()
+		task := s.tasks[taskId]
+		s.mu.RUnlock()
+
+		if task.Status != TaskStatusPending {
+			t.Fatalf("Expected status rolled back to %s, got %s", TaskStatusPending, task.Status)
+		}
+	})
 }

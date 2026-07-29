@@ -3,15 +3,15 @@ module human_validation_service
 go 1.26.4
 
 require (
-	github.com/AndrewK4758/shared_protos v0.0.0-20260708213456-d15044436a15
+	github.com/AndrewK4758/shared_protos v0.0.0-20260709011136-f55ddc746c56
 	github.com/AndrewK4758/shared_utils v0.0.0-00010101000000-000000000000
-	github.com/joho/godotenv v1.5.1
 	github.com/nats-io/nats.go v1.52.0
 	google.golang.org/grpc v1.82.1
 	google.golang.org/protobuf v1.36.11
 )
 
 require (
+	github.com/joho/godotenv v1.5.1 // indirect
 	github.com/klauspost/compress v1.19.0 // indirect
 	github.com/nats-io/nkeys v0.4.16 // indirect
 	github.com/nats-io/nuid v1.0.1 // indirect

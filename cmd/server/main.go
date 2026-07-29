@@ -23,7 +23,7 @@ func main() {
 	envutil.LoadEnv(".env", "human_validation_service/.env", "../.env", "../../.env")
 	logger.InitLogger()
 
-	natsURL := envutil.GetStringOrDefault("NATS_URL", "")
+	natsURL := envutil.MustGetString("NATS_URL")
 	if natsURL == "" {
 		natsURL = "nats://localhost:4222"
 	}
@@ -38,7 +38,10 @@ func main() {
 		logger.Fatal("HumanValidation", "Failed to init JetStream: %v", err)
 	}
 
-	natsServer := server.NewNatsServer(nc, js)
+	orchestratorAddr := envutil.MustGetString("ORCHESTRATOR_ADDRESS")
+
+	validationServer := server.NewHumanValidationServer(orchestratorAddr)
+	natsServer := server.NewNatsServer(nc, js, validationServer)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -48,25 +51,16 @@ func main() {
 		}
 	}()
 
-	port := envutil.GetStringOrDefault("PORT", "")
-	if port == "" {
-		port = "50056" // Using 50056
-	}
+	port := envutil.MustGetString("PORT")
 
 	listener, err := net.Listen("tcp", ":"+port)
 	if err != nil {
 		logger.Fatal("HumanValidation", "Failed to listen on port %s: %v", port, err)
 	}
 
-	orchestratorAddr := envutil.GetStringOrDefault("ORCHESTRATOR_ADDRESS", "")
-	if orchestratorAddr == "" {
-		orchestratorAddr = "localhost:50052"
-	}
-
 	grpcServer := grpc.NewServer()
 
-	// Register the Human Validation service and inject orchestrator connection address
-	validationServer := server.NewHumanValidationServer(orchestratorAddr)
+	// Register the Human Validation service
 	pb.RegisterHumanValidationServiceServer(grpcServer, validationServer)
 
 	// Register reflection service on gRPC server so clients can query it

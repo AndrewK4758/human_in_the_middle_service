@@ -11,6 +11,7 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/protobuf/proto"
 )
 
 const (
@@ -36,23 +37,27 @@ func NewHumanValidationServer(orchestratorAddr string) *HumanValidationServer {
 	}
 }
 
+func equalIdentity(a, b *pb.InfrastructureIdentity) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	return a.GetTenantId() == b.GetTenantId() &&
+		a.GetAppId() == b.GetAppId() &&
+		a.GetJobId() == b.GetJobId()
+}
+
 func (s *HumanValidationServer) CreateValidationTask(ctx context.Context, req *pb.CreateTaskRequest) (*pb.CreateTaskResponse, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	// Idempotency check: if a task already exists for this JobId, TenantId, AppId, and StepId, return it.
 	for _, t := range s.tasks {
-		if t.Identity != nil && req.GetIdentity() != nil {
-			if t.Identity.GetJobId() == req.GetIdentity().GetJobId() &&
-				t.Identity.GetTenantId() == req.GetIdentity().GetTenantId() &&
-				t.Identity.GetAppId() == req.GetIdentity().GetAppId() &&
-				t.GetStepId() == req.GetStepId() {
-				logger.Info("HumanValidation", "INFO: Idempotent CreateValidationTask: returning existing task %s for Job: %s", t.TaskId, req.GetIdentity().GetJobId())
-				return &pb.CreateTaskResponse{
-					TaskId: t.TaskId,
-					Status: TaskStatusExists,
-				}, nil
-			}
+		if equalIdentity(t.GetIdentity(), req.GetIdentity()) && t.GetStepId() == req.GetStepId() {
+			logger.Info("HumanValidation", "INFO: Idempotent CreateValidationTask: returning existing task %s for Job: %s", t.TaskId, req.GetIdentity().GetJobId())
+			return &pb.CreateTaskResponse{
+				TaskId: t.TaskId,
+				Status: TaskStatusExists,
+			}, nil
 		}
 	}
 
@@ -70,6 +75,7 @@ func (s *HumanValidationServer) CreateValidationTask(ctx context.Context, req *p
 		StepId:             req.GetStepId(),
 		StepContextInput:   req.GetStepContextInput(),
 		Metadata:           req.GetMetadata(),
+		ExpectedJsonSchema: req.GetExpectedJsonSchema(),
 	}
 
 	s.tasks[taskID] = task
@@ -83,15 +89,19 @@ func (s *HumanValidationServer) CreateValidationTask(ctx context.Context, req *p
 
 func (s *HumanValidationServer) GetPendingTasks(req *pb.GetPendingTasksRequest, stream pb.HumanValidationService_GetPendingTasksServer) error {
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-
 	filter := req.GetFilterStatus()
+	var tasksToStream []*pb.PendingTask
 
 	for _, task := range s.tasks {
 		if filter == "" || task.Status == filter {
-			if err := stream.Send(task); err != nil {
-				return fmt.Errorf("failed to stream pending task %s: %w", task.TaskId, err)
-			}
+			tasksToStream = append(tasksToStream, proto.Clone(task).(*pb.PendingTask))
+		}
+	}
+	s.mu.RUnlock()
+
+	for _, task := range tasksToStream {
+		if err := stream.Send(task); err != nil {
+			return fmt.Errorf("failed to stream pending task %s: %w", task.TaskId, err)
 		}
 	}
 
@@ -115,15 +125,19 @@ func (s *HumanValidationServer) SubmitCorrection(ctx context.Context, req *pb.Su
 		}, nil
 	}
 
-	if task.Status != TaskStatusPending {
+	currentStatus := task.Status
+	if currentStatus != TaskStatusPending {
 		s.mu.Unlock()
-		return nil, fmt.Errorf("task %s is already %s", req.GetTaskId(), task.Status)
+		return nil, fmt.Errorf("task %s is already %s", req.GetTaskId(), currentStatus)
 	}
 
 	task.Status = TaskStatusProcessing
+	identity := task.GetIdentity()
+	stepID := task.GetStepId()
 	s.mu.Unlock()
 
-	logger.Info("HumanValidation", "INFO: Human submitted correction for task %s, resuming job %s", req.GetTaskId(), task.GetIdentity().GetJobId())
+	jobID := identity.GetJobId()
+	logger.Info("HumanValidation", "INFO: Human submitted correction for task %s, resuming job %s", req.GetTaskId(), jobID)
 
 	// Call Orchestrator to ResumeJob
 	conn, err := grpc.NewClient(s.orchestratorAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -135,12 +149,12 @@ func (s *HumanValidationServer) SubmitCorrection(ctx context.Context, req *pb.Su
 
 	orchClient := pb.NewOrchestratorServiceClient(conn)
 	resumeReq := &pb.ResumeJobRequest{
-		Identity:      task.GetIdentity(),
+		Identity:      identity,
 		CorrectedJson: req.GetCorrectedJson(),
-		StepId:        task.GetStepId(),
+		StepId:        stepID,
 	}
 
-	logger.Info("HumanValidation", "INFO: Sending ResumeJob request to orchestrator for Job: %s", task.GetIdentity().GetJobId())
+	logger.Info("HumanValidation", "INFO: Sending ResumeJob request to orchestrator for Job: %s", jobID)
 	resp, err := orchClient.ResumeJob(ctx, resumeReq)
 	if err != nil {
 		s.rollbackTaskStatus(task, TaskStatusPending)

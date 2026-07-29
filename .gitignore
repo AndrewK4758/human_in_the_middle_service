@@ -1,3 +1,5 @@
 *_bin
 .idea/
 .vscode/
+bin/
+bin
