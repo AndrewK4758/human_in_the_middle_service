@@ -244,7 +244,7 @@ func TestHumanValidationServer_SubmitCorrection(t *testing.T) {
 	t.Run("Task Not Found Error Handling", func(t *testing.T) {
 		_, err := s.SubmitCorrection(ctx, &pb.SubmitCorrectionRequest{
 			TaskId:        "task_non_existent",
-			CorrectedJson: `{"status":"ok"}`,
+			Corrected: unmarshalStruct(`{"status":"ok"}`),
 		})
 		if err == nil {
 			t.Fatalf("Expected error when submitting correction for non-existent task")
@@ -267,7 +267,7 @@ func TestHumanValidationServer_SubmitCorrection(t *testing.T) {
 
 		_, err = s.SubmitCorrection(ctx, &pb.SubmitCorrectionRequest{
 			TaskId:        taskId,
-			CorrectedJson: `{"status":"ok"}`,
+			Corrected: unmarshalStruct(`{"status":"ok"}`),
 		})
 		if err == nil {
 			t.Fatalf("Expected error when submitting correction for task in PROCESSING status")
@@ -293,7 +293,7 @@ func TestHumanValidationServer_SubmitCorrection(t *testing.T) {
 
 		resp, err := s.SubmitCorrection(ctx, &pb.SubmitCorrectionRequest{
 			TaskId:        taskId,
-			CorrectedJson: `{"corrected": true}`,
+			Corrected: unmarshalStruct(`{"corrected": true}`),
 		})
 		if err != nil {
 			t.Fatalf("Failed to submit correction: %v", err)
@@ -327,7 +327,7 @@ func TestHumanValidationServer_SubmitCorrection(t *testing.T) {
 
 		resp, err := s.SubmitCorrection(ctx, &pb.SubmitCorrectionRequest{
 			TaskId:        taskId,
-			CorrectedJson: `{"corrected": true}`,
+			Corrected: unmarshalStruct(`{"corrected": true}`),
 		})
 		if err != nil {
 			t.Fatalf("Unexpected error for already resolved task: %v", err)
@@ -353,7 +353,7 @@ func TestHumanValidationServer_SubmitCorrection(t *testing.T) {
 
 		_, err = s.SubmitCorrection(ctx, &pb.SubmitCorrectionRequest{
 			TaskId:        taskId,
-			CorrectedJson: `{"corrected": true}`,
+			Corrected: unmarshalStruct(`{"corrected": true}`),
 		})
 		if err == nil {
 			t.Fatalf("Expected error when orchestrator ResumeJob returns error")
@@ -384,7 +384,7 @@ func TestHumanValidationServer_SubmitCorrection(t *testing.T) {
 
 		resp, err := s.SubmitCorrection(ctx, &pb.SubmitCorrectionRequest{
 			TaskId:        taskId,
-			CorrectedJson: `{"corrected": true}`,
+			Corrected: unmarshalStruct(`{"corrected": true}`),
 		})
 		if err != nil {
 			t.Fatalf("Unexpected error: %v", err)
@@ -402,3 +402,4 @@ func TestHumanValidationServer_SubmitCorrection(t *testing.T) {
 		}
 	})
 }
+

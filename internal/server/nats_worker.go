@@ -132,7 +132,7 @@ func (s *NatsServer) processMessage(ctx context.Context, msg jetstream.Msg) {
 
 	stepName := parser.GetNodeName()
 	systemInstructions := parser.GetSystemInstructions()
-	expectedSchema := parser.GetExpectedSchema()
+	expectedSchema := parser.GetExpectedSchemaStruct()
 	stepId := parser.GetStepId()
 
 	humanVal := parser.GetHumanValidationContract()
@@ -144,14 +144,14 @@ func (s *NatsServer) processMessage(ctx context.Context, msg jetstream.Msg) {
 	}
 	logger.Info("HumanValidation", "HumanValidation contract flags - Required: %v, BypassFallback: %v for step '%s' (ID: %s, job_name_id: %d)", hRequired, hBypassFallback, stepName, stepId, jobNameID)
 
-	globalStateJSON, _ := parser.GetGlobalStateJSON()
+	globalState := parser.GetGlobalState()
 
 	createReq := &pb.CreateTaskRequest{
 		Identity:           parser.GetIdentity(),
 		StepName:           stepName,
 		PromptInstructions: systemInstructions,
-		ExpectedJsonSchema: expectedSchema,
-		GlobalStateJson:    globalStateJSON,
+		ExpectedSchema:     expectedSchema,
+		GlobalState:        globalState,
 		StepId:             stepId,
 		Metadata:           parser.GetMetadata(),
 		ErrorMessage:       fmt.Sprintf("Human validation required for step '%s' (ID: %s)", stepName, stepId),

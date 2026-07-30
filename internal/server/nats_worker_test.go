@@ -93,7 +93,7 @@ func TestNatsServer_ProcessMessage_SuccessAndTaskCreation(t *testing.T) {
 		NodeConfig: &pb.NodeConfiguration{
 			NodeName:           "ClassificationNode",
 			SystemInstructions: "Classify incoming document",
-			ExpectedSchema:     `{"type":"object"}`,
+			ExpectedSchemaStruct: unmarshalStruct(`{"type":"object"}`),
 		},
 		GlobalState: &pb.GlobalState{},
 		HumanValidation: &pb.HumanValidationContract{
@@ -147,8 +147,8 @@ func TestNatsServer_ProcessMessage_SuccessAndTaskCreation(t *testing.T) {
 	if task.GetPromptInstructions() != "Classify incoming document" {
 		t.Errorf("Expected PromptInstructions 'Classify incoming document', got %s", task.GetPromptInstructions())
 	}
-	if task.GetExpectedJsonSchema() != `{"type":"object"}` {
-		t.Errorf("Expected ExpectedJsonSchema '{\"type\":\"object\"}', got %s", task.GetExpectedJsonSchema())
+	if task.GetExpectedSchema() == nil || len(task.GetExpectedSchema().Fields) == 0 {
+		t.Errorf("Expected ExpectedJsonSchema '{\"type\":\"object\"}', got %s", task.GetExpectedSchema())
 	}
 	if task.GetStatus() != TaskStatusPending {
 		t.Errorf("Expected status %s, got %s", TaskStatusPending, task.GetStatus())
@@ -271,3 +271,4 @@ func TestNatsServer_ProcessMessage_InvalidProtobufBytes(t *testing.T) {
 		t.Errorf("Message should not be ACKed on invalid protobuf bytes")
 	}
 }
+

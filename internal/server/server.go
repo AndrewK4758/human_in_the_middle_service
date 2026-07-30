@@ -71,11 +71,11 @@ func (s *HumanValidationServer) CreateValidationTask(ctx context.Context, req *p
 		ErrorMessage:       req.GetErrorMessage(),
 		TargetFields:       req.GetTargetFields(),
 		Status:             TaskStatusPending,
-		GlobalStateJson:    req.GetGlobalStateJson(),
+		GlobalState:        req.GetGlobalState(),
 		StepId:             req.GetStepId(),
 		StepContextInput:   req.GetStepContextInput(),
 		Metadata:           req.GetMetadata(),
-		ExpectedJsonSchema: req.GetExpectedJsonSchema(),
+		ExpectedSchema:     req.GetExpectedSchema(),
 	}
 
 	s.tasks[taskID] = task
@@ -150,7 +150,7 @@ func (s *HumanValidationServer) SubmitCorrection(ctx context.Context, req *pb.Su
 	orchClient := pb.NewOrchestratorServiceClient(conn)
 	resumeReq := &pb.ResumeJobRequest{
 		Identity:      identity,
-		CorrectedJson: req.GetCorrectedJson(),
+		Corrected:     req.GetCorrected(),
 		StepId:        stepID,
 	}
 

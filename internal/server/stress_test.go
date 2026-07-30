@@ -195,7 +195,7 @@ func TestStateMachine_ConcurrentSubmitCorrection(t *testing.T) {
 			defer wg.Done()
 			r, err := s.SubmitCorrection(ctx, &pb.SubmitCorrectionRequest{
 				TaskId:        taskId,
-				CorrectedJson: `{"fixed": true}`,
+				Corrected: unmarshalStruct(`{"fixed": true}`),
 			})
 			results[idx] = result{resp: r, err: err}
 		}(i)
@@ -264,7 +264,7 @@ func TestStateMachine_RollbackAndRetry(t *testing.T) {
 
 	_, err = s.SubmitCorrection(ctx, &pb.SubmitCorrectionRequest{
 		TaskId:        taskId,
-		CorrectedJson: `{"fixed": false}`,
+		Corrected: unmarshalStruct(`{"fixed": false}`),
 	})
 	if err == nil {
 		t.Fatalf("Expected error on orchestrator failure")
@@ -286,7 +286,7 @@ func TestStateMachine_RollbackAndRetry(t *testing.T) {
 
 	resp, err := s.SubmitCorrection(ctx, &pb.SubmitCorrectionRequest{
 		TaskId:        taskId,
-		CorrectedJson: `{"fixed": true}`,
+		Corrected: unmarshalStruct(`{"fixed": true}`),
 	})
 	if err != nil {
 		t.Fatalf("Unexpected error on retry: %v", err)
