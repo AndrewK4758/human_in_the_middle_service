@@ -74,7 +74,7 @@ func (m *mockMsg) Term() error { return nil }
 func (m *mockMsg) TermWithReason(reason string) error { return nil }
 
 func TestNatsServer_ProcessMessage_SuccessAndTaskCreation(t *testing.T) {
-	valServer := NewHumanValidationServer("localhost:50052")
+	valServer := NewHumanValidationServer("localhost:11112")
 	mockJS := newMockJetStream()
 
 	natsServer := &NatsServer{
@@ -89,7 +89,9 @@ func TestNatsServer_ProcessMessage_SuccessAndTaskCreation(t *testing.T) {
 			AppId:    "app_test",
 			JobId:    "job_test_123",
 		},
-		StepId: "step_classify_1",
+		GraphId:       "graph_test_123",
+		InitialNodeId: "node_init_123",
+		StepId:        "step_classify_1",
 		NodeConfig: &pb.NodeConfiguration{
 			NodeName:           "ClassificationNode",
 			SystemInstructions: "Classify incoming document",
@@ -156,7 +158,7 @@ func TestNatsServer_ProcessMessage_SuccessAndTaskCreation(t *testing.T) {
 }
 
 func TestNatsServer_ProcessMessage_PerformActionResponseWithErrorContract(t *testing.T) {
-	valServer := NewHumanValidationServer("localhost:50052")
+	valServer := NewHumanValidationServer("localhost:11112")
 	mockJS := newMockJetStream()
 
 	natsServer := &NatsServer{
@@ -171,7 +173,9 @@ func TestNatsServer_ProcessMessage_PerformActionResponseWithErrorContract(t *tes
 			AppId:    "a1",
 			JobId:    "job_test_response",
 		},
-		StepId: "step_val_2",
+		GraphId:       "graph_test_123",
+		InitialNodeId: "node_init_123",
+		StepId:        "step_val_2",
 		NodeConfig: &pb.NodeConfiguration{
 			NodeName: "HumanValidationStep",
 		},
@@ -247,7 +251,7 @@ func TestNatsServer_ProcessMessage_PerformActionResponseWithErrorContract(t *tes
 }
 
 func TestNatsServer_ProcessMessage_InvalidProtobufBytes(t *testing.T) {
-	valServer := NewHumanValidationServer("localhost:50052")
+	valServer := NewHumanValidationServer("localhost:11112")
 	mockJS := newMockJetStream()
 
 	natsServer := &NatsServer{
@@ -271,4 +275,93 @@ func TestNatsServer_ProcessMessage_InvalidProtobufBytes(t *testing.T) {
 		t.Errorf("Message should not be ACKed on invalid protobuf bytes")
 	}
 }
+
+func TestNatsServer_ProcessMessage_GraphIdAndInitialNodeIdExtraction(t *testing.T) {
+	valServer := NewHumanValidationServer("localhost:11112")
+	mockJS := newMockJetStream()
+
+	natsServer := &NatsServer{
+		nc:               nil,
+		js:               mockJS,
+		validationServer: valServer,
+	}
+
+	req := &pb.ExecuteWorkflowNodeRequest{
+		Identity: &pb.InfrastructureIdentity{
+			TenantId: "tenant_graph_test",
+			AppId:    "app_graph_test",
+			JobId:    "job_graph_test_789",
+		},
+		GraphId:       "graph_extract_001",
+		InitialNodeId: "node_init_extract_002",
+		StepId:        "step_extract_1",
+		NodeConfig: &pb.NodeConfiguration{
+			NodeName: "ExtractionNode",
+		},
+	}
+
+	reqBytes, err := proto.Marshal(req)
+	if err != nil {
+		t.Fatalf("Failed to marshal request: %v", err)
+	}
+
+	msg := &mockMsg{
+		data:    reqBytes,
+		subject: "worker.human.validation.extract",
+	}
+
+	ctx := context.Background()
+	natsServer.processMessage(ctx, msg)
+
+	if !msg.acked {
+		t.Errorf("Expected message with GraphId and InitialNodeId to be acknowledged")
+	}
+
+	valServer.mu.RLock()
+	defer valServer.mu.RUnlock()
+
+	if len(valServer.tasks) != 1 {
+		t.Fatalf("Expected 1 pending task, got %d", len(valServer.tasks))
+	}
+}
+
+func TestNatsServer_ProcessMessage_MissingIdentityFailFast(t *testing.T) {
+	valServer := NewHumanValidationServer("localhost:11112")
+	mockJS := newMockJetStream()
+
+	natsServer := &NatsServer{
+		nc:               nil,
+		js:               mockJS,
+		validationServer: valServer,
+	}
+
+	// Request with missing identity
+	req := &pb.ExecuteWorkflowNodeRequest{
+		StepId: "step_no_identity",
+		NodeConfig: &pb.NodeConfiguration{
+			NodeName: "NoIdentityNode",
+		},
+	}
+
+	reqBytes, err := proto.Marshal(req)
+	if err != nil {
+		t.Fatalf("Failed to marshal request: %v", err)
+	}
+
+	msg := &mockMsg{
+		data:    reqBytes,
+		subject: "worker.human.validation",
+	}
+
+	ctx := context.Background()
+	natsServer.processMessage(ctx, msg)
+
+	if !msg.nacked {
+		t.Errorf("Expected message with missing identity to be NACKed (fail-fast)")
+	}
+	if msg.acked {
+		t.Errorf("Message with missing identity must NOT be ACKed")
+	}
+}
+
 

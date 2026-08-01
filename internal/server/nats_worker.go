@@ -83,7 +83,7 @@ func (s *NatsServer) processMessage(ctx context.Context, msg jetstream.Msg) {
 
 	logger.Info("HumanValidation", "Received human validation request on subject: %s", msg.Subject())
 
-	t, a, j := "default", "default", "default"
+	t, a, j := "", "", ""
 	var req pb.ExecuteWorkflowNodeRequest
 	if err := proto.Unmarshal(msg.Data(), &req); err != nil {
 		logger.Error("HumanValidation", "Failed to unmarshal ExecuteWorkflowNodeRequest: %v", err)
@@ -105,17 +105,27 @@ func (s *NatsServer) processMessage(ctx context.Context, msg jetstream.Msg) {
 	}
 
 	parser := workflowparser.NewNodeRequestParser(&req)
+	if err := parser.Validate(); err != nil {
+		logger.Error("HumanValidation", "Invalid request identity: %v", err)
+		natsutil.LogJetStreamEvent(natsutil.JetStreamLogEvent{
+			Component:  "HumanValidation",
+			Event:      "NACKED",
+			Stream:     streamName,
+			Subject:    msg.Subject(),
+			Consumer:   "human_validation_workers",
+			TenantID:   t,
+			AppID:      a,
+			JobID:      j,
+			Attempt:    attempt,
+			DurationMs: time.Since(startTime).Milliseconds(),
+			Error:      err,
+		})
+		msg.NakWithDelay(5 * time.Second)
+		return
+	}
 	t, a, j = parser.ExtractIdentity()
-	if t == "" {
-		t = "default"
-	}
-	if a == "" {
-		a = "default"
-	}
-	if j == "" {
-		j = "default"
-	}
-	jobNameID := parser.GetJobNameId()
+	graphID := parser.GetGraphId()
+	initialNodeID := parser.GetInitialNodeId()
 
 	natsutil.LogJetStreamEvent(natsutil.JetStreamLogEvent{
 		Component: "HumanValidation",
@@ -142,7 +152,7 @@ func (s *NatsServer) processMessage(ctx context.Context, msg jetstream.Msg) {
 		hRequired = humanVal.GetRequired()
 		hBypassFallback = humanVal.GetBypassFallback()
 	}
-	logger.Info("HumanValidation", "HumanValidation contract flags - Required: %v, BypassFallback: %v for step '%s' (ID: %s, job_name_id: %d)", hRequired, hBypassFallback, stepName, stepId, jobNameID)
+	logger.Info("HumanValidation", "HumanValidation contract flags - Required: %v, BypassFallback: %v for step '%s' (ID: %s, graph_id: %s, initial_node_id: %s)", hRequired, hBypassFallback, stepName, stepId, graphID, initialNodeID)
 
 	globalState := parser.GetGlobalState()
 
@@ -158,11 +168,26 @@ func (s *NatsServer) processMessage(ctx context.Context, msg jetstream.Msg) {
 	}
 
 	if s.validationServer != nil {
-		if resp, err := s.validationServer.CreateValidationTask(ctx, createReq); err != nil {
+		resp, err := s.validationServer.CreateValidationTask(ctx, createReq)
+		if err != nil {
 			logger.Error("HumanValidation", "Failed to create validation task: %v", err)
-		} else {
-			logger.Info("HumanValidation", "Successfully registered pending validation task %s with status %s", resp.GetTaskId(), resp.GetStatus())
+			natsutil.LogJetStreamEvent(natsutil.JetStreamLogEvent{
+				Component:  "HumanValidation",
+				Event:      "NACKED",
+				Stream:     streamName,
+				Subject:    msg.Subject(),
+				Consumer:   "human_validation_workers",
+				TenantID:   t,
+				AppID:      a,
+				JobID:      j,
+				Attempt:    attempt,
+				DurationMs: time.Since(startTime).Milliseconds(),
+				Error:      err,
+			})
+			msg.NakWithDelay(5 * time.Second)
+			return
 		}
+		logger.Info("HumanValidation", "Successfully registered pending validation task %s with status %s", resp.GetTaskId(), resp.GetStatus())
 	}
 
 	var replySubj string
@@ -250,7 +275,7 @@ func (s *NatsServer) processMessage(ctx context.Context, msg jetstream.Msg) {
 	if err := msg.Ack(); err != nil {
 		logger.Info("HumanValidation", "Failed to ack msg: %v", err)
 	} else {
-		logger.Info("HumanValidation", "Successfully acknowledged human validation request and replied to %s (job_name_id: %d)", replySubj, jobNameID)
+		logger.Info("HumanValidation", "Successfully acknowledged human validation request and replied to %s (graph_id: %s, initial_node_id: %s)", replySubj, graphID, initialNodeID)
 		natsutil.LogJetStreamEvent(natsutil.JetStreamLogEvent{
 			Component:  "HumanValidation",
 			Event:      "ACKNOWLEDGED",

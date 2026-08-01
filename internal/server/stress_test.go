@@ -14,7 +14,7 @@ import (
 
 // TestStress_ConcurrentTaskCreation tests creation of 500 tasks concurrently to check for task ID collisions and race conditions.
 func TestStress_ConcurrentTaskCreation(t *testing.T) {
-	s := NewHumanValidationServer("localhost:50052")
+	s := NewHumanValidationServer("localhost:11112")
 	ctx := context.Background()
 
 	const numGoroutines = 100
@@ -68,7 +68,7 @@ func TestStress_ConcurrentTaskCreation(t *testing.T) {
 
 // TestStress_ConcurrentReadWriteDelete tests concurrent Create, GetPendingTasks, and Delete operations.
 func TestStress_ConcurrentReadWriteDelete(t *testing.T) {
-	s := NewHumanValidationServer("localhost:50052")
+	s := NewHumanValidationServer("localhost:11112")
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
@@ -307,7 +307,7 @@ func TestStateMachine_RollbackAndRetry(t *testing.T) {
 
 // TestNatsServer_ConcurrentProcessing tests NATS worker handling concurrent JetStream messages.
 func TestNatsServer_ConcurrentProcessing(t *testing.T) {
-	valServer := NewHumanValidationServer("localhost:50052")
+	valServer := NewHumanValidationServer("localhost:11112")
 	mockJS := newMockJetStream()
 	natsServer := &NatsServer{
 		nc:               nil,
@@ -330,7 +330,9 @@ func TestNatsServer_ConcurrentProcessing(t *testing.T) {
 					AppId:    "a_nats",
 					JobId:    fmt.Sprintf("job_nats_%d", idx),
 				},
-				StepId: fmt.Sprintf("step_nats_%d", idx),
+				GraphId:       fmt.Sprintf("graph_nats_%d", idx),
+				InitialNodeId: fmt.Sprintf("node_nats_init_%d", idx),
+				StepId:        fmt.Sprintf("step_nats_%d", idx),
 				NodeConfig: &pb.NodeConfiguration{
 					NodeName: "NatsStep",
 				},

@@ -161,11 +161,11 @@ func (s *HumanValidationServer) SubmitCorrection(ctx context.Context, req *pb.Su
 		return nil, fmt.Errorf("failed to resume job: %w", err)
 	}
 
-	if !resp.Success {
+	if !resp.GetSuccess() {
 		s.rollbackTaskStatus(task, TaskStatusPending)
 		return &pb.SubmitCorrectionResponse{
 			Success: false,
-			Message: fmt.Sprintf("Orchestrator failed to resume job: %s", resp.Message),
+			Message: fmt.Sprintf("Orchestrator failed to resume job: %s", resp.GetMessage()),
 		}, nil
 	}
 

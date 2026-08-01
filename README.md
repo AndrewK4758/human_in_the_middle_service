@@ -1,40 +1,48 @@
 # Human Validation Service
 
-This service acts as the human-in-the-loop validation manager for the Document Processor system. If/when the AI service produces an extraction output that does not match the JSON schema or business rules, the Orchestrator Service suspends the job and registers a manual validation task with this service.
+Welcome to the **Human Validation Service**, the human-in-the-loop validation manager for the Document Processor system. When automated extractions fail schema or business rule validations, this service handles manual intervention workflows, seamlessly pausing and resuming jobs.
 
-Once a human logs into a portal or triggers a script to submit a correction, this service updates the state and invokes the Orchestrator's `ResumeJob` endpoint, which increments the step and re-publishes the job to NATS JetStream to seamlessly resume the pipeline.
+## Documentation Index
 
-## Features
+1. **[Core Components](docs/01_Core_Components.md)**  
+   Overview of decoupled workflow processing and gRPC APIs.
+2. **[How to Implement](docs/02_How_To_Implement.md)**  
+   Instructions for local development and Docker deployment.
+3. **[Service Communication](docs/03_Service_Communication.md)**  
+   Details on resuming jobs and strict data contract mandates.
 
-- **Decoupled Workflow Processing**: Prevents thread-starvation or queue timeout issues by pausing jobs asynchronously.
-- **gRPC RPC API**:
-  - `CreateValidationTask`: Registers a job needing human intervention.
-  - `GetPendingTasks`: Returns tasks matching a status (e.g., `PENDING`).
-  - `SubmitCorrection`: Resolves the task and triggers job resumption.
-- **Complete Traceability**: Emits telemetry event tracking and matches system standards.
+---
 
-## Running Locally
+## High-Level Architecture
 
-To run the Human Validation Service locally:
+```mermaid
+flowchart TD
+    subgraph Infrastructure
+        NATS[(NATS JetStream)]
+    end
 
-```bash
-cd human_validation_service
-go run cmd/server/main.go
+    subgraph Clients
+        Orch[Orchestrator Service]
+        Portal[Human Validator Portal]
+    end
+
+    subgraph Human Validation Service
+        NatsWorker[NATS Consumer / Publisher]
+        GRPC[gRPC API Server]
+        Store[(Task Database)]
+    end
+
+    %% Orchestrator delegates task
+    Orch -->|Publish Node Request| NATS
+    NATS -->|Consume: worker.human.*| NatsWorker
+    NatsWorker -->|Suspend & Persist| Store
+    
+    %% Portal Interactions
+    Portal <-->|gRPC: GetPendingTasks| GRPC
+    Portal -->|gRPC: SubmitCorrection| GRPC
+    
+    %% Task Resumption
+    GRPC -->|Complete Task| NatsWorker
+    NatsWorker -->|Publish Action Response| NATS
+    NATS -->|Consume Reply| Orch
 ```
-
-The service runs on port `:50054` by default.
-
-## Docker Deployment
-
-To build and run inside Docker:
-
-```bash
-docker build -t human-validation-service -f Dockerfile ..
-```
-
-## 📜 Data Contracts & No Preemptive Serialization
-
-This service adheres to the strict **No Preemptive Serialization** mandate. 
-- All JSON-based structural state must be parsed natively using `google.protobuf.Struct` (or `structpb.Struct` in Go, `Dictionary<string, object>` in C#).
-- Preemptive stringification (e.g. converting nested objects to strings before the final persistence layer) is forbidden to prevent schema drift, whitespace corruption, and nested parsing bugs.
-- Boundary interfaces rely on typed object mappings rather than dynamic regex or fuzzy key lookups.

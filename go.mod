@@ -24,3 +24,6 @@ require (
 )
 
 replace github.com/AndrewK4758/shared_utils => ../shared_utils
+
+replace github.com/AndrewK4758/shared_protos => ../shared_protos
+

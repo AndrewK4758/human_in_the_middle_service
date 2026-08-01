@@ -18,7 +18,7 @@ import (
 
 func init() {
 	os.Setenv("WORKERS_STREAM", "WORKER_TASKS")
-	os.Setenv("ORCHESTRATOR_ADDRESS", "localhost:50052")
+	os.Setenv("ORCHESTRATOR_ADDRESS", "localhost:11112")
 }
 
 // -----------------------------------------------------------------------------
@@ -169,7 +169,7 @@ func TestChallenger_SubmitCorrection_EdgeCases(t *testing.T) {
 }
 
 func TestChallenger_NatsServer_ProcessMessage_EdgeCases(t *testing.T) {
-	valServer := NewHumanValidationServer("localhost:50052")
+	valServer := NewHumanValidationServer("localhost:11112")
 	mockJS := newMockJetStream()
 
 	natsServer := &NatsServer{
@@ -179,14 +179,17 @@ func TestChallenger_NatsServer_ProcessMessage_EdgeCases(t *testing.T) {
 	}
 	ctx := context.Background()
 
-	// 1.7 Empty byte slice payload []byte{}
+	// 1.7 Empty byte slice payload []byte{} (missing identity -> fail fast NACK)
 	msgEmpty := &mockMsg{
 		data:    []byte{},
 		subject: "worker.human.validation",
 	}
 	natsServer.processMessage(ctx, msgEmpty)
-	if !msgEmpty.acked {
-		t.Errorf("Expected empty byte slice to be processed and acked (valid empty proto)")
+	if !msgEmpty.nacked {
+		t.Errorf("Expected empty byte slice (missing identity) to be NACKed (fail-fast)")
+	}
+	if msgEmpty.acked {
+		t.Errorf("Empty byte slice payload must NOT be ACKed")
 	}
 
 	// 1.8 Proto message with ALL optional fields nil (Identity, NodeConfig, GlobalState, HumanValidation, Metadata)
@@ -197,8 +200,11 @@ func TestChallenger_NatsServer_ProcessMessage_EdgeCases(t *testing.T) {
 		subject: "worker.human.validation",
 	}
 	natsServer.processMessage(ctx, msgNilFields)
-	if !msgNilFields.acked {
-		t.Errorf("Expected request with all nil fields to be acked")
+	if !msgNilFields.nacked {
+		t.Errorf("Expected request with nil identity fields to be NACKed (fail-fast)")
+	}
+	if msgNilFields.acked {
+		t.Errorf("Request with nil identity fields must NOT be ACKed")
 	}
 
 	// 1.9 NATS publish failure on reply subject
@@ -336,7 +342,7 @@ func TestChallenger_OrchestratorDisconnectAndRollback(t *testing.T) {
 // -----------------------------------------------------------------------------
 
 func TestChallenger_StringPreservationFidelity(t *testing.T) {
-	valServer := NewHumanValidationServer("localhost:50052")
+	valServer := NewHumanValidationServer("localhost:11112")
 	mockJS := newMockJetStream()
 
 	natsServer := &NatsServer{
@@ -385,7 +391,9 @@ func TestChallenger_StringPreservationFidelity(t *testing.T) {
 			AppId:    "app_preservation",
 			JobId:    "job_preservation_1",
 		},
-		StepId: "step_preservation_1",
+		GraphId:       "graph_preservation_1",
+		InitialNodeId: "node_preservation_init",
+		StepId:        "step_preservation_1",
 		NodeConfig: &pb.NodeConfiguration{
 			NodeName:           "FidelityCheckNode",
 			SystemInstructions: complexPrompt,

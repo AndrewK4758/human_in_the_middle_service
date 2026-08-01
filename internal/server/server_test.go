@@ -11,7 +11,7 @@ import (
 )
 
 func TestHumanValidationServer_CreateAndList(t *testing.T) {
-	s := NewHumanValidationServer("localhost:50052")
+	s := NewHumanValidationServer("localhost:11112")
 
 	ctx := context.Background()
 
@@ -72,7 +72,7 @@ func (m *mockGetPendingTasksServer) Send(task *pb.PendingTask) error {
 }
 
 func TestHumanValidationServer_DeleteTask(t *testing.T) {
-	s := NewHumanValidationServer("localhost:50052")
+	s := NewHumanValidationServer("localhost:11112")
 	ctx := context.Background()
 
 	// 1. Create a task
@@ -114,7 +114,7 @@ func TestHumanValidationServer_DeleteTask(t *testing.T) {
 }
 
 func TestHumanValidationServer_CreateValidationTask_Idempotency(t *testing.T) {
-	s := NewHumanValidationServer("localhost:50052")
+	s := NewHumanValidationServer("localhost:11112")
 	ctx := context.Background()
 
 	tests := []struct {

@@ -24,9 +24,6 @@ func main() {
 	logger.InitLogger()
 
 	natsURL := envutil.MustGetString("NATS_URL")
-	if natsURL == "" {
-		natsURL = "nats://localhost:4222"
-	}
 	nc, err := natsutil.ConnectWithRetries(natsURL, "HumanValidation")
 	if err != nil {
 		logger.Fatal("HumanValidation", "Failed to connect to NATS: %v", err)
