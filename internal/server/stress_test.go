@@ -10,6 +10,7 @@ import (
 
 	pb "github.com/AndrewK4758/shared_protos"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/structpb"
 )
 
 // TestStress_ConcurrentTaskCreation tests creation of 500 tasks concurrently to check for task ID collisions and race conditions.
@@ -171,7 +172,11 @@ func TestStateMachine_ConcurrentSubmitCorrection(t *testing.T) {
 
 	// Create 1 task
 	createResp, err := s.CreateValidationTask(ctx, &pb.CreateTaskRequest{
-		Identity: &pb.InfrastructureIdentity{JobId: "job_state_machine"},
+		Identity: &pb.InfrastructureIdentity{
+			TenantId: "tenant_state",
+			AppId:    "app_state",
+			JobId:    "job_state_machine",
+		},
 		StepId:   "step_state",
 	})
 	if err != nil {
@@ -249,7 +254,11 @@ func TestStateMachine_RollbackAndRetry(t *testing.T) {
 	ctx := context.Background()
 
 	createResp, err := s.CreateValidationTask(ctx, &pb.CreateTaskRequest{
-		Identity: &pb.InfrastructureIdentity{JobId: "job_rollback_retry"},
+		Identity: &pb.InfrastructureIdentity{
+			TenantId: "tenant_rr",
+			AppId:    "app_rr",
+			JobId:    "job_rollback_retry",
+		},
 		StepId:   "step_rr",
 	})
 	if err != nil {
@@ -324,18 +333,21 @@ func TestNatsServer_ConcurrentProcessing(t *testing.T) {
 	for i := 0; i < numMsgs; i++ {
 		go func(idx int) {
 			defer wg.Done()
-			req := &pb.ExecuteWorkflowNodeRequest{
+			payloadStruct, _ := structpb.NewStruct(map[string]interface{}{
+				"graph_id":        fmt.Sprintf("graph_nats_%d", idx),
+				"initial_node_id": fmt.Sprintf("node_nats_init_%d", idx),
+				"step_id":         fmt.Sprintf("step_nats_%d", idx),
+				"node_name":       "NatsStep",
+			})
+			req := &pb.ExecuteTaskRequest{
 				Identity: &pb.InfrastructureIdentity{
 					TenantId: "t_nats",
 					AppId:    "a_nats",
 					JobId:    fmt.Sprintf("job_nats_%d", idx),
 				},
-				GraphId:       fmt.Sprintf("graph_nats_%d", idx),
-				InitialNodeId: fmt.Sprintf("node_nats_init_%d", idx),
-				StepId:        fmt.Sprintf("step_nats_%d", idx),
-				NodeConfig: &pb.NodeConfiguration{
-					NodeName: "NatsStep",
-				},
+				TaskSubject: "worker.human.validation",
+				StepId:      fmt.Sprintf("step_nats_%d", idx),
+				Payload:     payloadStruct,
 			}
 			data, _ := proto.Marshal(req)
 			msg := &mockMsg{

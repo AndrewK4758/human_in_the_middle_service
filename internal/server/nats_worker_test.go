@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"sync"
 	"testing"
 	"time"
@@ -9,6 +10,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/structpb"
 
 	pb "github.com/AndrewK4758/shared_protos"
 )
@@ -70,8 +72,14 @@ func (m *mockMsg) NakWithDelay(delay time.Duration) error {
 	return nil
 }
 func (m *mockMsg) InProgress() error { return nil }
-func (m *mockMsg) Term() error { return nil }
-func (m *mockMsg) TermWithReason(reason string) error { return nil }
+func (m *mockMsg) Term() error {
+	m.nacked = true
+	return nil
+}
+func (m *mockMsg) TermWithReason(reason string) error {
+	m.nacked = true
+	return nil
+}
 
 func TestNatsServer_ProcessMessage_SuccessAndTaskCreation(t *testing.T) {
 	valServer := NewHumanValidationServer("localhost:11112")
@@ -83,28 +91,39 @@ func TestNatsServer_ProcessMessage_SuccessAndTaskCreation(t *testing.T) {
 		validationServer: valServer,
 	}
 
-	req := &pb.ExecuteWorkflowNodeRequest{
+	var expectedSchemaMap map[string]interface{}
+	_ = json.Unmarshal([]byte(`{"type":"object"}`), &expectedSchemaMap)
+
+	payloadMap := map[string]interface{}{
+		"graph_id":            "graph_test_123",
+		"initial_node_id":     "node_init_123",
+		"step_id":             "step_classify_1",
+		"node_name":           "ClassificationNode",
+		"system_instructions": "Classify incoming document",
+		"expected_schema":     expectedSchemaMap,
+		"global_state":        map[string]interface{}{},
+		"human_validation": map[string]interface{}{
+			"required":        true,
+			"bypass_fallback": false,
+		},
+		"metadata": map[string]interface{}{
+			"env": "testing",
+		},
+	}
+	payloadStruct, err := structpb.NewStruct(payloadMap)
+	if err != nil {
+		t.Fatalf("Failed to create payload struct: %v", err)
+	}
+
+	req := &pb.ExecuteTaskRequest{
 		Identity: &pb.InfrastructureIdentity{
 			TenantId: "tenant_test",
 			AppId:    "app_test",
 			JobId:    "job_test_123",
 		},
-		GraphId:       "graph_test_123",
-		InitialNodeId: "node_init_123",
-		StepId:        "step_classify_1",
-		NodeConfig: &pb.NodeConfiguration{
-			NodeName:           "ClassificationNode",
-			SystemInstructions: "Classify incoming document",
-			ExpectedSchemaStruct: unmarshalStruct(`{"type":"object"}`),
-		},
-		GlobalState: &pb.GlobalState{},
-		HumanValidation: &pb.HumanValidationContract{
-			Required:       true,
-			BypassFallback: false,
-		},
-		Metadata: map[string]string{
-			"env": "testing",
-		},
+		TaskSubject: "worker.human.validation.step1",
+		StepId:      "step_classify_1",
+		Payload:     payloadStruct,
 	}
 
 	reqBytes, err := proto.Marshal(req)
@@ -167,18 +186,25 @@ func TestNatsServer_ProcessMessage_PerformActionResponseWithErrorContract(t *tes
 		validationServer: valServer,
 	}
 
-	req := &pb.ExecuteWorkflowNodeRequest{
+	payloadStruct, err := structpb.NewStruct(map[string]interface{}{
+		"graph_id":        "graph_test_123",
+		"initial_node_id": "node_init_123",
+		"step_id":         "step_val_2",
+		"node_name":       "HumanValidationStep",
+	})
+	if err != nil {
+		t.Fatalf("Failed to create payload struct: %v", err)
+	}
+
+	req := &pb.ExecuteTaskRequest{
 		Identity: &pb.InfrastructureIdentity{
 			TenantId: "t1",
 			AppId:    "a1",
 			JobId:    "job_test_response",
 		},
-		GraphId:       "graph_test_123",
-		InitialNodeId: "node_init_123",
-		StepId:        "step_val_2",
-		NodeConfig: &pb.NodeConfiguration{
-			NodeName: "HumanValidationStep",
-		},
+		TaskSubject: "worker.human.validation",
+		StepId:      "step_val_2",
+		Payload:     payloadStruct,
 	}
 
 	reqBytes, err := proto.Marshal(req)
@@ -235,7 +261,7 @@ func TestNatsServer_ProcessMessage_PerformActionResponseWithErrorContract(t *tes
 		t.Errorf("Expected Source 'human_validation_service', got %s", errContract.GetSource())
 	}
 
-	payloadStruct := errContract.GetClientPayload()
+	payloadStruct = errContract.GetClientPayload()
 	if payloadStruct == nil {
 		t.Fatalf("Expected ClientPayload to be non-nil")
 	}
@@ -286,18 +312,25 @@ func TestNatsServer_ProcessMessage_GraphIdAndInitialNodeIdExtraction(t *testing.
 		validationServer: valServer,
 	}
 
-	req := &pb.ExecuteWorkflowNodeRequest{
+	payloadStruct, err := structpb.NewStruct(map[string]interface{}{
+		"graph_id":        "graph_extract_001",
+		"initial_node_id": "node_init_extract_002",
+		"step_id":         "step_extract_1",
+		"node_name":       "ExtractionNode",
+	})
+	if err != nil {
+		t.Fatalf("Failed to create payload struct: %v", err)
+	}
+
+	req := &pb.ExecuteTaskRequest{
 		Identity: &pb.InfrastructureIdentity{
 			TenantId: "tenant_graph_test",
 			AppId:    "app_graph_test",
 			JobId:    "job_graph_test_789",
 		},
-		GraphId:       "graph_extract_001",
-		InitialNodeId: "node_init_extract_002",
-		StepId:        "step_extract_1",
-		NodeConfig: &pb.NodeConfiguration{
-			NodeName: "ExtractionNode",
-		},
+		TaskSubject: "worker.human.validation.extract",
+		StepId:      "step_extract_1",
+		Payload:     payloadStruct,
 	}
 
 	reqBytes, err := proto.Marshal(req)
@@ -336,11 +369,14 @@ func TestNatsServer_ProcessMessage_MissingIdentityFailFast(t *testing.T) {
 	}
 
 	// Request with missing identity
-	req := &pb.ExecuteWorkflowNodeRequest{
-		StepId: "step_no_identity",
-		NodeConfig: &pb.NodeConfiguration{
-			NodeName: "NoIdentityNode",
-		},
+	payloadStruct, _ := structpb.NewStruct(map[string]interface{}{
+		"step_id":   "step_no_identity",
+		"node_name": "NoIdentityNode",
+	})
+	req := &pb.ExecuteTaskRequest{
+		TaskSubject: "worker.human.validation",
+		StepId:      "step_no_identity",
+		Payload:     payloadStruct,
 	}
 
 	reqBytes, err := proto.Marshal(req)

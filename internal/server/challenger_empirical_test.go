@@ -47,42 +47,27 @@ func TestChallenger_SubmitCorrection_EdgeCases(t *testing.T) {
 		TaskId:        "",
 		Corrected: unmarshalStruct(`{"key": "value"}`),
 	})
-	if err == nil || !strings.Contains(err.Error(), "not found") {
-		t.Fatalf("Expected 'not found' error for empty task ID, got: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "missing required taskId") {
+		t.Fatalf("Expected 'missing required taskId' error for empty task ID, got: %v", err)
 	}
 
-	// 1.3 Task created with nil Identity
-	createResp, err := s.CreateValidationTask(ctx, &pb.CreateTaskRequest{
+	// 1.3 Task created with nil Identity returns error due to fail-fast assertion
+	_, err = s.CreateValidationTask(ctx, &pb.CreateTaskRequest{
 		Identity: nil,
 		StepId:   "step_nil_id",
 	})
-	if err != nil {
-		t.Fatalf("Failed to create task with nil identity: %v", err)
-	}
-	taskIdNilId := createResp.GetTaskId()
-
-	mockOrch.resumeJobFunc = func(ctx context.Context, req *pb.ResumeJobRequest) (*pb.ResumeJobResponse, error) {
-		if req.GetIdentity() != nil {
-			t.Errorf("Expected nil identity in ResumeJobRequest, got %v", req.GetIdentity())
-		}
-		return &pb.ResumeJobResponse{Success: true, Message: "ok"}, nil
-	}
-
-	resp, err := s.SubmitCorrection(ctx, &pb.SubmitCorrectionRequest{
-		TaskId:        taskIdNilId,
-		Corrected: unmarshalStruct(`{"corrected": true}`),
-	})
-	if err != nil {
-		t.Fatalf("SubmitCorrection with nil task identity failed: %v", err)
-	}
-	if !resp.GetSuccess() {
-		t.Fatalf("Expected success for nil task identity")
+	if err == nil {
+		t.Fatalf("Expected error for CreateValidationTask with nil identity, got none")
 	}
 
 	// 1.4 Invalid status transitions
 	// Create task and force various status strings
 	createResp2, err := s.CreateValidationTask(ctx, &pb.CreateTaskRequest{
-		Identity: &pb.InfrastructureIdentity{JobId: "job_status_test"},
+		Identity: &pb.InfrastructureIdentity{
+			TenantId: "tenant_status",
+			AppId:    "app_status",
+			JobId:    "job_status_test",
+		},
 		StepId:   "step_status",
 	})
 	if err != nil {
@@ -143,7 +128,11 @@ func TestChallenger_SubmitCorrection_EdgeCases(t *testing.T) {
 	// 1.6 >4MB payload exceeds default gRPC 4MB limit -> verify graceful rollback to PENDING
 	// Create another task
 	createRespExceed, _ := s.CreateValidationTask(ctx, &pb.CreateTaskRequest{
-		Identity: &pb.InfrastructureIdentity{JobId: "job_exceed_4mb"},
+		Identity: &pb.InfrastructureIdentity{
+			TenantId: "tenant_exceed",
+			AppId:    "app_exceed",
+			JobId:    "job_exceed_4mb",
+		},
 		StepId:   "step_exceed",
 	})
 	taskIdExceed := createRespExceed.GetTaskId()
@@ -192,8 +181,8 @@ func TestChallenger_NatsServer_ProcessMessage_EdgeCases(t *testing.T) {
 		t.Errorf("Empty byte slice payload must NOT be ACKed")
 	}
 
-	// 1.8 Proto message with ALL optional fields nil (Identity, NodeConfig, GlobalState, HumanValidation, Metadata)
-	reqNilFields := &pb.ExecuteWorkflowNodeRequest{}
+	// 1.8 Proto message with ALL optional fields nil (Identity, TaskSubject, Payload)
+	reqNilFields := &pb.ExecuteTaskRequest{}
 	reqBytes, _ := proto.Marshal(reqNilFields)
 	msgNilFields := &mockMsg{
 		data:    reqBytes,
@@ -247,7 +236,11 @@ func TestChallenger_OrchestratorDisconnectAndRollback(t *testing.T) {
 
 	// Create task
 	createResp, err := s.CreateValidationTask(ctx, &pb.CreateTaskRequest{
-		Identity: &pb.InfrastructureIdentity{JobId: "job_disconnect_test"},
+		Identity: &pb.InfrastructureIdentity{
+			TenantId: "tenant_disc",
+			AppId:    "app_disc",
+			JobId:    "job_disconnect_test",
+		},
 		StepId:   "step_disc",
 	})
 	if err != nil {
@@ -306,7 +299,11 @@ func TestChallenger_OrchestratorDisconnectAndRollback(t *testing.T) {
 
 	// 2.3 Context deadline / cancellation handling during SubmitCorrection
 	createResp3, _ := s.CreateValidationTask(ctx, &pb.CreateTaskRequest{
-		Identity: &pb.InfrastructureIdentity{JobId: "job_ctx_timeout"},
+		Identity: &pb.InfrastructureIdentity{
+			TenantId: "tenant_timeout",
+			AppId:    "app_timeout",
+			JobId:    "job_ctx_timeout",
+		},
 		StepId:   "step_timeout",
 	})
 	taskIdTimeout := createResp3.GetTaskId()
@@ -383,23 +380,35 @@ func TestChallenger_StringPreservationFidelity(t *testing.T) {
 	globalStateJSONStr := `{"document_id":"doc_9999_xyz","amount":9999.99,"is_valid":true,"tags":["finance","urgent","invoice"],"nested":{"raw_text":"Sample text with \n newlines and \"quotes\"","code":200}}`
 	var gsMap map[string]any
 	_ = json.Unmarshal([]byte(globalStateJSONStr), &gsMap)
-	funcStruct, _ := structpb.NewStruct(gsMap)
 
-	req := &pb.ExecuteWorkflowNodeRequest{
+	var complexSchemaMap map[string]interface{}
+	_ = json.Unmarshal([]byte(complexSchema), &complexSchemaMap)
+
+	payloadMap := map[string]interface{}{
+		"graph_id":            "graph_preservation_1",
+		"initial_node_id":     "node_preservation_init",
+		"step_id":             "step_preservation_1",
+		"node_name":           "FidelityCheckNode",
+		"system_instructions": complexPrompt,
+		"expected_schema":     complexSchemaMap,
+		"global_state": map[string]interface{}{
+			"functional": gsMap,
+		},
+	}
+	payloadStruct, err := structpb.NewStruct(payloadMap)
+	if err != nil {
+		t.Fatalf("Failed to create payload struct: %v", err)
+	}
+
+	req := &pb.ExecuteTaskRequest{
 		Identity: &pb.InfrastructureIdentity{
 			TenantId: "tenant_preservation",
 			AppId:    "app_preservation",
 			JobId:    "job_preservation_1",
 		},
-		GraphId:       "graph_preservation_1",
-		InitialNodeId: "node_preservation_init",
-		StepId:        "step_preservation_1",
-		NodeConfig: &pb.NodeConfiguration{
-			NodeName:           "FidelityCheckNode",
-			SystemInstructions: complexPrompt,
-			ExpectedSchemaStruct: unmarshalStruct(complexSchema),
-		},
-		GlobalState: &pb.GlobalState{Functional: funcStruct},
+		TaskSubject: "worker.human.validation",
+		StepId:      "step_preservation_1",
+		Payload:     payloadStruct,
 	}
 
 	reqBytes, err := proto.Marshal(req)

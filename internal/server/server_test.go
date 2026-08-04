@@ -17,7 +17,11 @@ func TestHumanValidationServer_CreateAndList(t *testing.T) {
 
 	// 1. Create a task
 	createReq := &pb.CreateTaskRequest{
-		Identity:       &pb.InfrastructureIdentity{JobId: "job_test"},
+		Identity: &pb.InfrastructureIdentity{
+			TenantId: "tenant_test",
+			AppId:    "app_test",
+			JobId:    "job_test",
+		},
 		StepName:       "Classification",
 		FailedAiOutput: `{"classification": ""}`,
 		ErrorMessage:   "expected field is empty: classification",
@@ -77,7 +81,11 @@ func TestHumanValidationServer_DeleteTask(t *testing.T) {
 
 	// 1. Create a task
 	createReq := &pb.CreateTaskRequest{
-		Identity: &pb.InfrastructureIdentity{JobId: "job_test_delete"},
+		Identity: &pb.InfrastructureIdentity{
+			TenantId: "tenant_test",
+			AppId:    "app_test",
+			JobId:    "job_test_delete",
+		},
 	}
 
 	createResp, err := s.CreateValidationTask(ctx, createReq)
@@ -123,6 +131,7 @@ func TestHumanValidationServer_CreateValidationTask_Idempotency(t *testing.T) {
 		stepId        string
 		useIdentity   bool
 		expectedStat  string
+		expectedErr   bool
 		expectedCount int
 	}{
 		{
@@ -158,10 +167,10 @@ func TestHumanValidationServer_CreateValidationTask_Idempotency(t *testing.T) {
 			expectedCount: 3,
 		},
 		{
-			name:          "Edge Case (Legacy/Null Identity)",
+			name:          "Edge Case (Null Identity Fail Fast)",
 			useIdentity:   false,
-			expectedStat:  "CREATED",
-			expectedCount: 4,
+			expectedErr:   true,
+			expectedCount: 3,
 		},
 	}
 
@@ -173,10 +182,23 @@ func TestHumanValidationServer_CreateValidationTask_Idempotency(t *testing.T) {
 				StepId: tt.stepId,
 			}
 			if tt.useIdentity {
-				req.Identity = &pb.InfrastructureIdentity{JobId: tt.jobId}
+				req.Identity = &pb.InfrastructureIdentity{
+					TenantId: "tenant_idemp",
+					AppId:    "app_idemp",
+					JobId:    tt.jobId,
+				}
 			}
 
 			resp, err := s.CreateValidationTask(ctx, req)
+			if tt.expectedErr {
+				if err == nil {
+					t.Fatalf("Expected error for null identity, got none")
+				}
+				if len(s.tasks) != tt.expectedCount {
+					t.Errorf("Expected map size %d, got %d", tt.expectedCount, len(s.tasks))
+				}
+				return
+			}
 			if err != nil {
 				t.Fatalf("Failed to create task: %v", err)
 			}
@@ -253,8 +275,12 @@ func TestHumanValidationServer_SubmitCorrection(t *testing.T) {
 
 	t.Run("Task Invalid Status (Processing)", func(t *testing.T) {
 		createResp, err := s.CreateValidationTask(ctx, &pb.CreateTaskRequest{
-			Identity: &pb.InfrastructureIdentity{JobId: "job_processing"},
-			StepId:   "step_proc",
+			Identity: &pb.InfrastructureIdentity{
+				TenantId: "tenant_test",
+				AppId:    "app_test",
+				JobId:    "job_processing",
+			},
+			StepId: "step_proc",
 		})
 		if err != nil {
 			t.Fatalf("Failed to create task: %v", err)
@@ -266,7 +292,7 @@ func TestHumanValidationServer_SubmitCorrection(t *testing.T) {
 		s.mu.Unlock()
 
 		_, err = s.SubmitCorrection(ctx, &pb.SubmitCorrectionRequest{
-			TaskId:        taskId,
+			TaskId:    taskId,
 			Corrected: unmarshalStruct(`{"status":"ok"}`),
 		})
 		if err == nil {
@@ -283,8 +309,12 @@ func TestHumanValidationServer_SubmitCorrection(t *testing.T) {
 		}
 
 		createResp, err := s.CreateValidationTask(ctx, &pb.CreateTaskRequest{
-			Identity: &pb.InfrastructureIdentity{JobId: "job_succ"},
-			StepId:   "step_succ",
+			Identity: &pb.InfrastructureIdentity{
+				TenantId: "tenant_test",
+				AppId:    "app_test",
+				JobId:    "job_succ",
+			},
+			StepId: "step_succ",
 		})
 		if err != nil {
 			t.Fatalf("Failed to create task: %v", err)
@@ -292,7 +322,7 @@ func TestHumanValidationServer_SubmitCorrection(t *testing.T) {
 		taskId := createResp.GetTaskId()
 
 		resp, err := s.SubmitCorrection(ctx, &pb.SubmitCorrectionRequest{
-			TaskId:        taskId,
+			TaskId:    taskId,
 			Corrected: unmarshalStruct(`{"corrected": true}`),
 		})
 		if err != nil {
@@ -313,8 +343,12 @@ func TestHumanValidationServer_SubmitCorrection(t *testing.T) {
 
 	t.Run("Task Already Resolved (Idempotence)", func(t *testing.T) {
 		createResp, err := s.CreateValidationTask(ctx, &pb.CreateTaskRequest{
-			Identity: &pb.InfrastructureIdentity{JobId: "job_already_resolved"},
-			StepId:   "step_res",
+			Identity: &pb.InfrastructureIdentity{
+				TenantId: "tenant_test",
+				AppId:    "app_test",
+				JobId:    "job_already_resolved",
+			},
+			StepId: "step_res",
 		})
 		if err != nil {
 			t.Fatalf("Failed to create task: %v", err)
@@ -326,7 +360,7 @@ func TestHumanValidationServer_SubmitCorrection(t *testing.T) {
 		s.mu.Unlock()
 
 		resp, err := s.SubmitCorrection(ctx, &pb.SubmitCorrectionRequest{
-			TaskId:        taskId,
+			TaskId:    taskId,
 			Corrected: unmarshalStruct(`{"corrected": true}`),
 		})
 		if err != nil {
@@ -343,8 +377,12 @@ func TestHumanValidationServer_SubmitCorrection(t *testing.T) {
 		}
 
 		createResp, err := s.CreateValidationTask(ctx, &pb.CreateTaskRequest{
-			Identity: &pb.InfrastructureIdentity{JobId: "job_fail_grpc"},
-			StepId:   "step_fail_grpc",
+			Identity: &pb.InfrastructureIdentity{
+				TenantId: "tenant_test",
+				AppId:    "app_test",
+				JobId:    "job_fail_grpc",
+			},
+			StepId: "step_fail_grpc",
 		})
 		if err != nil {
 			t.Fatalf("Failed to create task: %v", err)
@@ -352,7 +390,7 @@ func TestHumanValidationServer_SubmitCorrection(t *testing.T) {
 		taskId := createResp.GetTaskId()
 
 		_, err = s.SubmitCorrection(ctx, &pb.SubmitCorrectionRequest{
-			TaskId:        taskId,
+			TaskId:    taskId,
 			Corrected: unmarshalStruct(`{"corrected": true}`),
 		})
 		if err == nil {
@@ -374,8 +412,12 @@ func TestHumanValidationServer_SubmitCorrection(t *testing.T) {
 		}
 
 		createResp, err := s.CreateValidationTask(ctx, &pb.CreateTaskRequest{
-			Identity: &pb.InfrastructureIdentity{JobId: "job_fail_resp"},
-			StepId:   "step_fail_resp",
+			Identity: &pb.InfrastructureIdentity{
+				TenantId: "tenant_test",
+				AppId:    "app_test",
+				JobId:    "job_fail_resp",
+			},
+			StepId: "step_fail_resp",
 		})
 		if err != nil {
 			t.Fatalf("Failed to create task: %v", err)

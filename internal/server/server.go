@@ -7,10 +7,14 @@ import (
 	"time"
 
 	pb "github.com/AndrewK4758/shared_protos"
+	"github.com/AndrewK4758/shared_utils/identityparser"
 	"github.com/AndrewK4758/shared_utils/logger"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -47,6 +51,14 @@ func equalIdentity(a, b *pb.InfrastructureIdentity) bool {
 }
 
 func (s *HumanValidationServer) CreateValidationTask(ctx context.Context, req *pb.CreateTaskRequest) (*pb.CreateTaskResponse, error) {
+	if err := identityparser.NewIdentityParser(req.GetIdentity()).Validate(true); err != nil {
+		logger.Error("HumanValidation", "FAIL-FAST ASSERTION FAILED (CreateValidationTask): %v", err)
+		return nil, status.Errorf(codes.InvalidArgument, "invalid identity: %v", err)
+	}
+
+	reqJson, _ := protojson.Marshal(req)
+	logger.Info("HumanValidation", "Received CreateValidationTask request: %s", string(reqJson))
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -109,6 +121,12 @@ func (s *HumanValidationServer) GetPendingTasks(req *pb.GetPendingTasksRequest, 
 }
 
 func (s *HumanValidationServer) SubmitCorrection(ctx context.Context, req *pb.SubmitCorrectionRequest) (*pb.SubmitCorrectionResponse, error) {
+	if req.GetTaskId() == "" {
+		err := fmt.Errorf("missing required taskId")
+		logger.Error("HumanValidation", "FAIL-FAST ASSERTION FAILED (SubmitCorrection): %v", err)
+		return nil, status.Errorf(codes.InvalidArgument, "%v", err)
+	}
+
 	s.mu.Lock()
 	task, exists := s.tasks[req.GetTaskId()]
 	if !exists {
