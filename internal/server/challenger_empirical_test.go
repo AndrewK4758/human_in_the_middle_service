@@ -1,5 +1,6 @@
 package server
 
+
 import (
 	"context"
 	"encoding/json"
@@ -221,8 +222,8 @@ func TestChallenger_NatsServer_ProcessMessage_EdgeCases(t *testing.T) {
 				"node_config": structpb.NewStructValue(&structpb.Struct{
 					Fields: map[string]*structpb.Value{
 						"node_name": structpb.NewStringValue("TestNode"),
-						"system_instructions": structpb.NewStringValue("instructions"),
-						"expected_schema": structpb.NewStructValue(&structpb.Struct{}),
+						"system_instructions": structpb.NewStringValue("instructions"), 
+						"expected_schema_struct": structpb.NewStructValue(&structpb.Struct{}),
 					},
 				}),
 				"global_state": structpb.NewStructValue(&structpb.Struct{
@@ -412,13 +413,12 @@ func TestChallenger_StringPreservationFidelity(t *testing.T) {
 	var complexSchemaMap map[string]interface{}
 	_ = json.Unmarshal([]byte(complexSchema), &complexSchemaMap)
 
-	gsMap["system_instructions"] = complexPrompt
-
 	payloadMap := map[string]interface{}{
 		"node_config": map[string]interface{}{
 			"node_name": "FidelityCheckNode",
+			"expected_schema_struct": complexSchemaMap, 
+			"system_instructions": complexPrompt,
 		},
-		"expected_schema":     complexSchemaMap,
 		"global_state": map[string]interface{}{
 			"functional": gsMap,
 		},

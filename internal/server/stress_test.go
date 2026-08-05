@@ -1,5 +1,6 @@
 package server
 
+
 import (
 	"context"
 	"fmt"
@@ -334,8 +335,6 @@ func TestNatsServer_ConcurrentProcessing(t *testing.T) {
 		go func(idx int) {
 			defer wg.Done()
 			payloadStruct, _ := structpb.NewStruct(map[string]interface{}{
-				"graph_id":        fmt.Sprintf("graph_nats_%d", idx),
-				"initial_node_id": fmt.Sprintf("node_nats_init_%d", idx),
 				"node_config": map[string]interface{}{
 					"node_name":       "NatsStep",
 				},

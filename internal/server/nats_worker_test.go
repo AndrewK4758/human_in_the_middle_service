@@ -1,5 +1,6 @@
 package server
 
+
 import (
 	"context"
 	"encoding/json"
@@ -95,20 +96,18 @@ func TestNatsServer_ProcessMessage_SuccessAndTaskCreation(t *testing.T) {
 	_ = json.Unmarshal([]byte(`{"type":"object"}`), &expectedSchemaMap)
 
 	payloadMap := map[string]interface{}{
-		"graph_id":            "graph_test_123",
-		"initial_node_id":     "node_init_123",
 		"node_config": map[string]interface{}{
 			"node_name":           "ClassificationNode",
+			"expected_schema_struct": expectedSchemaMap, 
+			"system_instructions": "Classify incoming document",
 		},
-		"expected_schema":     expectedSchemaMap,
+		"human_validation": map[string]interface{}{
+			"required":        true,
+			"bypass_fallback": false,
+		},
 		"global_state":        map[string]interface{}{
 			"functional": map[string]interface{}{
 				"step_id":             "step_classify_1",
-				"system_instructions": "Classify incoming document",
-				"human_validation": map[string]interface{}{
-					"required":        true,
-					"bypass_fallback": false,
-				},
 			},
 		},
 		"metadata": map[string]interface{}{
@@ -192,8 +191,6 @@ func TestNatsServer_ProcessMessage_PerformActionResponseWithErrorContract(t *tes
 	}
 
 	payloadStruct, err := structpb.NewStruct(map[string]interface{}{
-		"graph_id":        "graph_test_123",
-		"initial_node_id": "node_init_123",
 		"node_config": map[string]interface{}{
 			"node_name":       "HumanValidationStep",
 		},
@@ -324,8 +321,6 @@ func TestNatsServer_ProcessMessage_GraphIdAndInitialNodeIdExtraction(t *testing.
 	}
 
 	payloadStruct, err := structpb.NewStruct(map[string]interface{}{
-		"graph_id":        "graph_extract_001",
-		"initial_node_id": "node_init_extract_002",
 		"node_config": map[string]interface{}{
 			"node_name":       "ExtractionNode",
 		},

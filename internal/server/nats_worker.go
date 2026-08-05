@@ -1,5 +1,6 @@
 package server
 
+
 import (
 	"context"
 	"encoding/json"
@@ -130,51 +131,40 @@ func (s *NatsServer) processMessage(ctx context.Context, msg jetstream.Msg) {
 
 	parser := workflowparser.NewTaskRequestParser(&req)
 	parser.MustValidateRootPayloadStrict(j)
-	funcState := parser.MustGetFunctionalState(j)
-	
-	getString := func(k string) string {
-		if v, ok := funcState[k].(string); ok {
-			return v
-		}
-		return ""
-	}
 
-	graphID := getString("graph_id")
-	initialNodeID := getString("initial_node_id")
+	executeTaskPayload := parser.MustGetExecuteTaskPayload()
+
 	stepName := parser.MustGetNodeNameStrict(j)
 	stepId := req.StepId
-	if stepId == "" {
-		stepId = getString("step_id")
+
+	var systemInstructions string
+	if executeTaskPayload.NodeConfig != nil {
+		systemInstructions = executeTaskPayload.NodeConfig.SystemInstructions
 	}
-	systemInstructions := getString("system_instructions")
 
 	var expectedSchema *structpb.Struct
-	if es, ok := payloadMap["expected_schema"]; ok {
-		if b, err := json.Marshal(es); err == nil {
+	if executeTaskPayload.NodeConfig != nil {
+		if executeTaskPayload.NodeConfig.ExpectedSchemaStruct != nil {
+			expectedSchema = executeTaskPayload.NodeConfig.ExpectedSchemaStruct
+		} else if executeTaskPayload.NodeConfig.ExpectedSchema != "" {
 			expectedSchema = &structpb.Struct{}
-			protojson.Unmarshal(b, expectedSchema)
+			_ = expectedSchema.UnmarshalJSON([]byte(executeTaskPayload.NodeConfig.ExpectedSchema))
 		}
 	}
 
 	var humanVal *pb.HumanValidationContract
-	if hv, ok := funcState["human_validation"]; ok {
-		if b, err := json.Marshal(hv); err == nil {
-			humanVal = &pb.HumanValidationContract{}
-			protojson.Unmarshal(b, humanVal)
-		}
-	}
+	humanVal = executeTaskPayload.HumanValidation
 
 	var globalState *pb.GlobalState
-	if gs, ok := payloadMap["global_state"]; ok {
-		if b, err := json.Marshal(gs); err == nil {
-			globalState = &pb.GlobalState{}
-			protojson.Unmarshal(b, globalState)
-		}
+	if executeTaskPayload.GlobalState != nil {
+		b, _ := executeTaskPayload.GlobalState.MarshalJSON()
+		globalState = &pb.GlobalState{}
+		_ = protojson.Unmarshal(b, globalState)
 	}
 
 	metadata := map[string]string{}
-	if md, ok := payloadMap["metadata"].(map[string]interface{}); ok {
-		for k, v := range md {
+	if executeTaskPayload.Metadata != nil {
+		for k, v := range executeTaskPayload.Metadata.AsMap() {
 			if strV, ok := v.(string); ok {
 				metadata[k] = strV
 			}
@@ -200,7 +190,7 @@ func (s *NatsServer) processMessage(ctx context.Context, msg jetstream.Msg) {
 		hRequired = humanVal.GetRequired()
 		hBypassFallback = humanVal.GetBypassFallback()
 	}
-	logger.Info("HumanValidation", "HumanValidation contract flags - Required: %v, BypassFallback: %v for step '%s' (ID: %s, graph_id: %s, initial_node_id: %s)", hRequired, hBypassFallback, stepName, stepId, graphID, initialNodeID)
+	logger.Info("HumanValidation", "HumanValidation contract flags - Required: %v, BypassFallback: %v for step '%s' (ID: %s)", hRequired, hBypassFallback, stepName, stepId)
 
 	createReq := &pb.CreateTaskRequest{
 		Identity:           req.Identity,
@@ -330,7 +320,7 @@ func (s *NatsServer) processMessage(ctx context.Context, msg jetstream.Msg) {
 	if err := msg.Ack(); err != nil {
 		logger.Info("HumanValidation", "Failed to ack msg: %v", err)
 	} else {
-		logger.Info("HumanValidation", "Successfully acknowledged human validation request and replied to %s (graph_id: %s, initial_node_id: %s)", replySubj, graphID, initialNodeID)
+		logger.Info("HumanValidation", "Successfully acknowledged human validation request and replied to %s", replySubj)
 		natsutil.LogJetStreamEvent(natsutil.JetStreamLogEvent{
 			Component:  "HumanValidation",
 			Event:      "ACKNOWLEDGED",
