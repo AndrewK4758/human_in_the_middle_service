@@ -51,10 +51,7 @@ func equalIdentity(a, b *pb.InfrastructureIdentity) bool {
 }
 
 func (s *HumanValidationServer) CreateValidationTask(ctx context.Context, req *pb.CreateTaskRequest) (*pb.CreateTaskResponse, error) {
-	if err := identityparser.NewIdentityParser(req.GetIdentity()).Validate(true); err != nil {
-		logger.Error("HumanValidation", "FAIL-FAST ASSERTION FAILED (CreateValidationTask): %v", err)
-		return nil, status.Errorf(codes.InvalidArgument, "invalid identity: %v", err)
-	}
+	identityparser.NewIdentityParser(req.GetIdentity()).MustValidate(true, "CreateValidationTask")
 
 	reqJson, _ := protojson.Marshal(req)
 	logger.Info("HumanValidation", "Received CreateValidationTask request: %s", string(reqJson))

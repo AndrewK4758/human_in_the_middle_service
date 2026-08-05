@@ -51,14 +51,18 @@ func TestChallenger_SubmitCorrection_EdgeCases(t *testing.T) {
 		t.Fatalf("Expected 'missing required taskId' error for empty task ID, got: %v", err)
 	}
 
-	// 1.3 Task created with nil Identity returns error due to fail-fast assertion
-	_, err = s.CreateValidationTask(ctx, &pb.CreateTaskRequest{
-		Identity: nil,
-		StepId:   "step_nil_id",
-	})
-	if err == nil {
-		t.Fatalf("Expected error for CreateValidationTask with nil identity, got none")
-	}
+	// 1.3 Task created with nil Identity panics due to fail-fast assertion
+	func() {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Fatalf("Expected panic for CreateValidationTask with nil identity, got none")
+			}
+		}()
+		_, _ = s.CreateValidationTask(ctx, &pb.CreateTaskRequest{
+			Identity: nil,
+			StepId:   "step_nil_id",
+		})
+	}()
 
 	// 1.4 Invalid status transitions
 	// Create task and force various status strings
@@ -168,18 +172,19 @@ func TestChallenger_NatsServer_ProcessMessage_EdgeCases(t *testing.T) {
 	}
 	ctx := context.Background()
 
-	// 1.7 Empty byte slice payload []byte{} (missing identity -> fail fast NACK)
+	// 1.7 Empty byte slice payload []byte{} (missing identity -> fail fast panic)
 	msgEmpty := &mockMsg{
 		data:    []byte{},
 		subject: "worker.human.validation",
 	}
-	natsServer.processMessage(ctx, msgEmpty)
-	if !msgEmpty.nacked {
-		t.Errorf("Expected empty byte slice (missing identity) to be NACKed (fail-fast)")
-	}
-	if msgEmpty.acked {
-		t.Errorf("Empty byte slice payload must NOT be ACKed")
-	}
+	func() {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Errorf("Expected panic for empty byte slice (missing identity)")
+			}
+		}()
+		natsServer.processMessage(ctx, msgEmpty)
+	}()
 
 	// 1.8 Proto message with ALL optional fields nil (Identity, TaskSubject, Payload)
 	reqNilFields := &pb.ExecuteTaskRequest{}
@@ -188,13 +193,14 @@ func TestChallenger_NatsServer_ProcessMessage_EdgeCases(t *testing.T) {
 		data:    reqBytes,
 		subject: "worker.human.validation",
 	}
-	natsServer.processMessage(ctx, msgNilFields)
-	if !msgNilFields.nacked {
-		t.Errorf("Expected request with nil identity fields to be NACKed (fail-fast)")
-	}
-	if msgNilFields.acked {
-		t.Errorf("Request with nil identity fields must NOT be ACKed")
-	}
+	func() {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Errorf("Expected panic for request with nil identity fields")
+			}
+		}()
+		natsServer.processMessage(ctx, msgNilFields)
+	}()
 
 	// 1.9 NATS publish failure on reply subject
 	mockJSFail := newMockJetStream()
@@ -207,8 +213,30 @@ func TestChallenger_NatsServer_ProcessMessage_EdgeCases(t *testing.T) {
 
 	headers := nats.Header{}
 	headers.Set("Reply-Subject", "orchestrator.reply.fail")
+	validReq := &pb.ExecuteTaskRequest{
+		Identity: &pb.InfrastructureIdentity{TenantId: "t", AppId: "a", JobId: "j"},
+		TaskSubject: "worker.human.validation",
+		Payload: &structpb.Struct{
+			Fields: map[string]*structpb.Value{
+				"node_config": structpb.NewStructValue(&structpb.Struct{
+					Fields: map[string]*structpb.Value{
+						"node_name": structpb.NewStringValue("TestNode"),
+						"system_instructions": structpb.NewStringValue("instructions"),
+						"expected_schema": structpb.NewStructValue(&structpb.Struct{}),
+					},
+				}),
+				"global_state": structpb.NewStructValue(&structpb.Struct{
+					Fields: map[string]*structpb.Value{
+						"functional": structpb.NewStructValue(&structpb.Struct{}),
+					},
+				}),
+			},
+		},
+	}
+	validReqBytes, _ := proto.Marshal(validReq)
+	
 	msgReplyFail := &mockMsg{
-		data:    reqBytes,
+		data:    validReqBytes,
 		subject: "worker.human.validation",
 		headers: headers,
 	}
@@ -384,12 +412,12 @@ func TestChallenger_StringPreservationFidelity(t *testing.T) {
 	var complexSchemaMap map[string]interface{}
 	_ = json.Unmarshal([]byte(complexSchema), &complexSchemaMap)
 
+	gsMap["system_instructions"] = complexPrompt
+
 	payloadMap := map[string]interface{}{
-		"graph_id":            "graph_preservation_1",
-		"initial_node_id":     "node_preservation_init",
-		"step_id":             "step_preservation_1",
-		"node_name":           "FidelityCheckNode",
-		"system_instructions": complexPrompt,
+		"node_config": map[string]interface{}{
+			"node_name": "FidelityCheckNode",
+		},
 		"expected_schema":     complexSchemaMap,
 		"global_state": map[string]interface{}{
 			"functional": gsMap,

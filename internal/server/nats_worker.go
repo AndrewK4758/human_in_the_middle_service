@@ -18,6 +18,7 @@ import (
 	"github.com/AndrewK4758/shared_utils/identityparser"
 	"github.com/AndrewK4758/shared_utils/logger"
 	"github.com/AndrewK4758/shared_utils/natsutil"
+	"github.com/AndrewK4758/shared_utils/workflowparser"
 )
 
 type TaskCreator interface {
@@ -106,44 +107,10 @@ func (s *NatsServer) processMessage(ctx context.Context, msg jetstream.Msg) {
 		return
 	}
 
-	if err := identityparser.NewIdentityParser(req.GetIdentity()).Validate(true); err != nil {
-		logger.Error("HumanValidation", "FAIL-FAST ASSERTION FAILED: invalid identity - %v", err)
-		natsutil.LogJetStreamEvent(natsutil.JetStreamLogEvent{
-			Component:  "HumanValidation",
-			Event:      "TERMINATED",
-			Stream:     streamName,
-			Subject:    msg.Subject(),
-			Consumer:   "human_validation_workers",
-			TenantID:   "default",
-			AppID:      "default",
-			JobID:      "default",
-			Attempt:    attempt,
-			DurationMs: time.Since(startTime).Milliseconds(),
-			Error:      err,
-		})
-		msg.Term()
-		return
-	}
+	identityparser.NewIdentityParser(req.GetIdentity()).MustValidate(true, "HumanValidation_NatsWorker")
 
 	if req.GetTaskSubject() == "" {
-		err := fmt.Errorf("missing required TaskSubject")
-		logger.Error("HumanValidation", "FAIL-FAST ASSERTION FAILED: %v", err)
-		t, a, j = natsutil.ExtractIdentity(req.Identity)
-		natsutil.LogJetStreamEvent(natsutil.JetStreamLogEvent{
-			Component:  "HumanValidation",
-			Event:      "TERMINATED",
-			Stream:     streamName,
-			Subject:    msg.Subject(),
-			Consumer:   "human_validation_workers",
-			TenantID:   t,
-			AppID:      a,
-			JobID:      j,
-			Attempt:    attempt,
-			DurationMs: time.Since(startTime).Milliseconds(),
-			Error:      err,
-		})
-		msg.Term()
-		return
+		panic(fmt.Errorf("action failed for job HumanValidation_NatsWorker: missing required TaskSubject"))
 	}
 
 	t, a, j = natsutil.ExtractIdentity(req.Identity)
@@ -161,8 +128,12 @@ func (s *NatsServer) processMessage(ctx context.Context, msg jetstream.Msg) {
 		logger.Info("HumanValidation", "DEQUEUED Input Payload: %s", string(payloadBytes))
 	}
 
+	parser := workflowparser.NewTaskRequestParser(&req)
+	parser.MustValidateRootPayloadStrict(j)
+	funcState := parser.MustGetFunctionalState(j)
+	
 	getString := func(k string) string {
-		if v, ok := payloadMap[k].(string); ok {
+		if v, ok := funcState[k].(string); ok {
 			return v
 		}
 		return ""
@@ -170,7 +141,7 @@ func (s *NatsServer) processMessage(ctx context.Context, msg jetstream.Msg) {
 
 	graphID := getString("graph_id")
 	initialNodeID := getString("initial_node_id")
-	stepName := getString("node_name")
+	stepName := parser.MustGetNodeNameStrict(j)
 	stepId := req.StepId
 	if stepId == "" {
 		stepId = getString("step_id")
@@ -186,7 +157,7 @@ func (s *NatsServer) processMessage(ctx context.Context, msg jetstream.Msg) {
 	}
 
 	var humanVal *pb.HumanValidationContract
-	if hv, ok := payloadMap["human_validation"]; ok {
+	if hv, ok := funcState["human_validation"]; ok {
 		if b, err := json.Marshal(hv); err == nil {
 			humanVal = &pb.HumanValidationContract{}
 			protojson.Unmarshal(b, humanVal)

@@ -131,7 +131,7 @@ func TestHumanValidationServer_CreateValidationTask_Idempotency(t *testing.T) {
 		stepId        string
 		useIdentity   bool
 		expectedStat  string
-		expectedErr   bool
+		expectedPanic bool
 		expectedCount int
 	}{
 		{
@@ -169,7 +169,7 @@ func TestHumanValidationServer_CreateValidationTask_Idempotency(t *testing.T) {
 		{
 			name:          "Edge Case (Null Identity Fail Fast)",
 			useIdentity:   false,
-			expectedErr:   true,
+			expectedPanic: true,
 			expectedCount: 3,
 		},
 	}
@@ -189,16 +189,23 @@ func TestHumanValidationServer_CreateValidationTask_Idempotency(t *testing.T) {
 				}
 			}
 
-			resp, err := s.CreateValidationTask(ctx, req)
-			if tt.expectedErr {
-				if err == nil {
-					t.Fatalf("Expected error for null identity, got none")
-				}
-				if len(s.tasks) != tt.expectedCount {
-					t.Errorf("Expected map size %d, got %d", tt.expectedCount, len(s.tasks))
-				}
+			var resp *pb.CreateTaskResponse
+			var err error
+			
+			if tt.expectedPanic {
+				func() {
+					defer func() {
+						if r := recover(); r == nil {
+							t.Fatalf("Expected panic for null identity, got none")
+						}
+					}()
+					resp, err = s.CreateValidationTask(ctx, req)
+				}()
 				return
+			} else {
+				resp, err = s.CreateValidationTask(ctx, req)
 			}
+			
 			if err != nil {
 				t.Fatalf("Failed to create task: %v", err)
 			}

@@ -97,14 +97,19 @@ func TestNatsServer_ProcessMessage_SuccessAndTaskCreation(t *testing.T) {
 	payloadMap := map[string]interface{}{
 		"graph_id":            "graph_test_123",
 		"initial_node_id":     "node_init_123",
-		"step_id":             "step_classify_1",
-		"node_name":           "ClassificationNode",
-		"system_instructions": "Classify incoming document",
+		"node_config": map[string]interface{}{
+			"node_name":           "ClassificationNode",
+		},
 		"expected_schema":     expectedSchemaMap,
-		"global_state":        map[string]interface{}{},
-		"human_validation": map[string]interface{}{
-			"required":        true,
-			"bypass_fallback": false,
+		"global_state":        map[string]interface{}{
+			"functional": map[string]interface{}{
+				"step_id":             "step_classify_1",
+				"system_instructions": "Classify incoming document",
+				"human_validation": map[string]interface{}{
+					"required":        true,
+					"bypass_fallback": false,
+				},
+			},
 		},
 		"metadata": map[string]interface{}{
 			"env": "testing",
@@ -189,8 +194,14 @@ func TestNatsServer_ProcessMessage_PerformActionResponseWithErrorContract(t *tes
 	payloadStruct, err := structpb.NewStruct(map[string]interface{}{
 		"graph_id":        "graph_test_123",
 		"initial_node_id": "node_init_123",
-		"step_id":         "step_val_2",
-		"node_name":       "HumanValidationStep",
+		"node_config": map[string]interface{}{
+			"node_name":       "HumanValidationStep",
+		},
+		"global_state": map[string]interface{}{
+			"functional": map[string]interface{}{
+				"step_id":         "step_val_2",
+			},
+		},
 	})
 	if err != nil {
 		t.Fatalf("Failed to create payload struct: %v", err)
@@ -315,8 +326,14 @@ func TestNatsServer_ProcessMessage_GraphIdAndInitialNodeIdExtraction(t *testing.
 	payloadStruct, err := structpb.NewStruct(map[string]interface{}{
 		"graph_id":        "graph_extract_001",
 		"initial_node_id": "node_init_extract_002",
-		"step_id":         "step_extract_1",
-		"node_name":       "ExtractionNode",
+		"node_config": map[string]interface{}{
+			"node_name":       "ExtractionNode",
+		},
+		"global_state": map[string]interface{}{
+			"functional": map[string]interface{}{
+				"step_id":         "step_extract_1",
+			},
+		},
 	})
 	if err != nil {
 		t.Fatalf("Failed to create payload struct: %v", err)
@@ -370,8 +387,14 @@ func TestNatsServer_ProcessMessage_MissingIdentityFailFast(t *testing.T) {
 
 	// Request with missing identity
 	payloadStruct, _ := structpb.NewStruct(map[string]interface{}{
-		"step_id":   "step_no_identity",
-		"node_name": "NoIdentityNode",
+		"node_config": map[string]interface{}{
+			"node_name":       "NoIdentityNode",
+		},
+		"global_state": map[string]interface{}{
+			"functional": map[string]interface{}{
+				"step_id":   "step_no_identity",
+			},
+		},
 	})
 	req := &pb.ExecuteTaskRequest{
 		TaskSubject: "worker.human.validation",
@@ -390,14 +413,14 @@ func TestNatsServer_ProcessMessage_MissingIdentityFailFast(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	natsServer.processMessage(ctx, msg)
-
-	if !msg.nacked {
-		t.Errorf("Expected message with missing identity to be NACKed (fail-fast)")
-	}
-	if msg.acked {
-		t.Errorf("Message with missing identity must NOT be ACKed")
-	}
+	func() {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Errorf("Expected panic for missing identity")
+			}
+		}()
+		natsServer.processMessage(ctx, msg)
+	}()
 }
 
 
