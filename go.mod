@@ -5,6 +5,7 @@ go 1.26.4
 require (
 	github.com/AndrewK4758/shared_protos v0.0.0-20260709011136-f55ddc746c56
 	github.com/AndrewK4758/shared_utils v0.0.0-00010101000000-000000000000
+	github.com/google/uuid v1.6.0
 	github.com/nats-io/nats.go v1.52.0
 	google.golang.org/grpc v1.82.1
 	google.golang.org/protobuf v1.36.11
@@ -26,4 +27,3 @@ require (
 replace github.com/AndrewK4758/shared_utils => ../shared_utils
 
 replace github.com/AndrewK4758/shared_protos => ../shared_protos
-

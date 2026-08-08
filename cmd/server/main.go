@@ -11,6 +11,7 @@ import (
 
 	"github.com/nats-io/nats.go/jetstream"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/reflection"
 
 	"human_validation_service/internal/server"
@@ -37,7 +38,15 @@ func main() {
 
 	orchestratorAddr := envutil.MustGetString("ORCHESTRATOR_ADDRESS")
 
-	validationServer := server.NewHumanValidationServer(orchestratorAddr)
+	// Connect to Orchestrator once
+	conn, err := grpc.NewClient(orchestratorAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		logger.Fatal("HumanValidation", "Failed to connect to orchestrator at %s: %v", orchestratorAddr, err)
+	}
+	defer conn.Close()
+	orchClient := pb.NewOrchestratorServiceClient(conn)
+
+	validationServer := server.NewHumanValidationServer(js, orchClient)
 	natsServer := server.NewNatsServer(nc, js, validationServer)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

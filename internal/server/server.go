@@ -3,16 +3,15 @@ package server
 import (
 	"context"
 	"fmt"
-	"sync"
-	"time"
+
+	"github.com/google/uuid"
 
 	pb "github.com/AndrewK4758/shared_protos"
 	"github.com/AndrewK4758/shared_utils/identityparser"
 	"github.com/AndrewK4758/shared_utils/logger"
+	"github.com/nats-io/nats.go/jetstream"
 
-	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
@@ -28,16 +27,22 @@ const (
 
 type HumanValidationServer struct {
 	pb.UnimplementedHumanValidationServiceServer
-
-	orchestratorAddr string
-	mu               sync.RWMutex
-	tasks            map[string]*pb.PendingTask
+	orchClient pb.OrchestratorServiceClient
+	kv         jetstream.KeyValue
 }
 
-func NewHumanValidationServer(orchestratorAddr string) *HumanValidationServer {
+func NewHumanValidationServer(js jetstream.JetStream, orchClient pb.OrchestratorServiceClient) *HumanValidationServer {
+	ctx := context.Background()
+	kv, err := js.CreateOrUpdateKeyValue(ctx, jetstream.KeyValueConfig{
+		Bucket: "HUMAN_VALIDATION_TASKS",
+	})
+	if err != nil {
+		panic(fmt.Errorf("failed to initialize key-value store: %w", err))
+	}
+
 	return &HumanValidationServer{
-		orchestratorAddr: orchestratorAddr,
-		tasks:            make(map[string]*pb.PendingTask),
+		orchClient: orchClient,
+		kv:         kv,
 	}
 }
 
@@ -56,21 +61,31 @@ func (s *HumanValidationServer) CreateValidationTask(ctx context.Context, req *p
 	reqJson, _ := protojson.Marshal(req)
 	logger.Info("HumanValidation", "Received CreateValidationTask request: %s", string(reqJson))
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	// Idempotency check: if a task already exists for this JobId, TenantId, AppId, and StepId, return it.
-	for _, t := range s.tasks {
-		if equalIdentity(t.GetIdentity(), req.GetIdentity()) && t.GetStepId() == req.GetStepId() {
-			logger.Info("HumanValidation", "INFO: Idempotent CreateValidationTask: returning existing task %s for Job: %s", t.TaskId, req.GetIdentity().GetJobId())
-			return &pb.CreateTaskResponse{
-				TaskId: t.TaskId,
-				Status: TaskStatusExists,
-			}, nil
+	// Idempotency check
+	keys, err := s.kv.Keys(ctx)
+	if err != nil && err != jetstream.ErrNoKeysFound {
+		return nil, status.Errorf(codes.Internal, "failed to get keys from kv: %v", err)
+	}
+	if err == nil {
+		for _, k := range keys {
+			entry, err := s.kv.Get(ctx, k)
+			if err != nil {
+				continue
+			}
+			var t pb.PendingTask
+			if err := proto.Unmarshal(entry.Value(), &t); err == nil {
+				if equalIdentity(t.GetIdentity(), req.GetIdentity()) && t.GetStepId() == req.GetStepId() {
+					logger.Info("HumanValidation", "INFO: Idempotent CreateValidationTask: returning existing task %s for Job: %s", t.TaskId, req.GetIdentity().GetJobId())
+					return &pb.CreateTaskResponse{
+						TaskId: t.TaskId,
+						Status: TaskStatusExists,
+					}, nil
+				}
+			}
 		}
 	}
 
-	taskID := fmt.Sprintf("task_%d", time.Now().UnixNano())
+	taskID := uuid.New().String()
 	task := &pb.PendingTask{
 		TaskId:             taskID,
 		Identity:           req.GetIdentity(),
@@ -87,7 +102,16 @@ func (s *HumanValidationServer) CreateValidationTask(ctx context.Context, req *p
 		ExpectedSchema:     req.GetExpectedSchema(),
 	}
 
-	s.tasks[taskID] = task
+	taskBytes, err := proto.Marshal(task)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to marshal task: %v", err)
+	}
+
+	_, err = s.kv.Put(ctx, taskID, taskBytes)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to save task: %v", err)
+	}
+
 	logger.Info("HumanValidation", "INFO: Created human validation task %s for Job: %s", taskID, req.GetIdentity().GetJobId())
 
 	return &pb.CreateTaskResponse{
@@ -97,20 +121,28 @@ func (s *HumanValidationServer) CreateValidationTask(ctx context.Context, req *p
 }
 
 func (s *HumanValidationServer) GetPendingTasks(req *pb.GetPendingTasksRequest, stream pb.HumanValidationService_GetPendingTasksServer) error {
-	s.mu.RLock()
 	filter := req.GetFilterStatus()
-	var tasksToStream []*pb.PendingTask
 
-	for _, task := range s.tasks {
-		if filter == "" || task.Status == filter {
-			tasksToStream = append(tasksToStream, proto.Clone(task).(*pb.PendingTask))
+	keys, err := s.kv.Keys(stream.Context())
+	if err != nil {
+		if err == jetstream.ErrNoKeysFound {
+			return nil
 		}
+		return status.Errorf(codes.Internal, "failed to read tasks: %v", err)
 	}
-	s.mu.RUnlock()
 
-	for _, task := range tasksToStream {
-		if err := stream.Send(task); err != nil {
-			return fmt.Errorf("failed to stream pending task %s: %w", task.TaskId, err)
+	for _, k := range keys {
+		entry, err := s.kv.Get(stream.Context(), k)
+		if err != nil {
+			continue
+		}
+		var task pb.PendingTask
+		if err := proto.Unmarshal(entry.Value(), &task); err == nil {
+			if filter == "" || task.Status == filter {
+				if err := stream.Send(&task); err != nil {
+					return status.Errorf(codes.Internal, "failed to stream pending task %s: %v", task.TaskId, err)
+				}
+			}
 		}
 	}
 
@@ -124,15 +156,20 @@ func (s *HumanValidationServer) SubmitCorrection(ctx context.Context, req *pb.Su
 		return nil, status.Errorf(codes.InvalidArgument, "%v", err)
 	}
 
-	s.mu.Lock()
-	task, exists := s.tasks[req.GetTaskId()]
-	if !exists {
-		s.mu.Unlock()
-		return nil, fmt.Errorf("task %s not found", req.GetTaskId())
+	entry, err := s.kv.Get(ctx, req.GetTaskId())
+	if err != nil {
+		if err == jetstream.ErrKeyNotFound {
+			return nil, status.Errorf(codes.NotFound, "task %s not found", req.GetTaskId())
+		}
+		return nil, status.Errorf(codes.Internal, "failed to read task: %v", err)
+	}
+
+	var task pb.PendingTask
+	if err := proto.Unmarshal(entry.Value(), &task); err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to parse task: %v", err)
 	}
 
 	if task.Status == TaskStatusResolved {
-		s.mu.Unlock()
 		logger.Info("HumanValidation", "INFO: Task %s is already RESOLVED, treating as idempotent success", req.GetTaskId())
 		return &pb.SubmitCorrectionResponse{
 			Success: true,
@@ -140,53 +177,52 @@ func (s *HumanValidationServer) SubmitCorrection(ctx context.Context, req *pb.Su
 		}, nil
 	}
 
-	currentStatus := task.Status
-	if currentStatus != TaskStatusPending {
-		s.mu.Unlock()
-		return nil, fmt.Errorf("task %s is already %s", req.GetTaskId(), currentStatus)
+	if task.Status != TaskStatusPending {
+		return nil, status.Errorf(codes.FailedPrecondition, "task %s is already %s", req.GetTaskId(), task.Status)
 	}
 
 	task.Status = TaskStatusProcessing
-	identity := task.GetIdentity()
-	stepID := task.GetStepId()
-	s.mu.Unlock()
+	taskBytes, _ := proto.Marshal(&task)
+	_, err = s.kv.Update(ctx, req.GetTaskId(), taskBytes, entry.Revision())
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "failed to update task status: %v", err)
+	}
 
-	jobID := identity.GetJobId()
+	jobID := task.GetIdentity().GetJobId()
 	logger.Info("HumanValidation", "INFO: Human submitted correction for task %s, resuming job %s", req.GetTaskId(), jobID)
 
-	// Call Orchestrator to ResumeJob
-	conn, err := grpc.NewClient(s.orchestratorAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err != nil {
-		s.rollbackTaskStatus(task, TaskStatusPending)
-		return nil, fmt.Errorf("failed to connect to orchestrator at %s: %w", s.orchestratorAddr, err)
-	}
-	defer conn.Close()
-
-	orchClient := pb.NewOrchestratorServiceClient(conn)
 	resumeReq := &pb.ResumeJobRequest{
-		Identity:      identity,
-		Corrected:     req.GetCorrected(),
-		StepId:        stepID,
+		Identity:  task.GetIdentity(),
+		Corrected: req.GetCorrected(),
+		StepId:    task.GetStepId(),
 	}
 
 	logger.Info("HumanValidation", "INFO: Sending ResumeJob request to orchestrator for Job: %s", jobID)
-	resp, err := orchClient.ResumeJob(ctx, resumeReq)
+	resp, err := s.orchClient.ResumeJob(ctx, resumeReq)
 	if err != nil {
-		s.rollbackTaskStatus(task, TaskStatusPending)
-		return nil, fmt.Errorf("failed to resume job: %w", err)
+		s.rollbackTaskStatus(ctx, req.GetTaskId(), TaskStatusPending)
+		return nil, status.Errorf(codes.Internal, "failed to resume job: %v", err)
 	}
 
 	if !resp.GetSuccess() {
-		s.rollbackTaskStatus(task, TaskStatusPending)
+		s.rollbackTaskStatus(ctx, req.GetTaskId(), TaskStatusPending)
 		return &pb.SubmitCorrectionResponse{
 			Success: false,
 			Message: fmt.Sprintf("Orchestrator failed to resume job: %s", resp.GetMessage()),
 		}, nil
 	}
 
-	s.mu.Lock()
-	task.Status = TaskStatusResolved
-	s.mu.Unlock()
+	entry2, err := s.kv.Get(ctx, req.GetTaskId())
+	if err == nil {
+		var t2 pb.PendingTask
+		if proto.Unmarshal(entry2.Value(), &t2) == nil {
+			t2.Status = TaskStatusResolved
+			t2Bytes, _ := proto.Marshal(&t2)
+			if _, err := s.kv.Update(ctx, req.GetTaskId(), t2Bytes, entry2.Revision()); err != nil {
+				logger.Error("HumanValidation", "Failed to update task to RESOLVED: %v", err)
+			}
+		}
+	}
 
 	return &pb.SubmitCorrectionResponse{
 		Success: true,
@@ -195,16 +231,15 @@ func (s *HumanValidationServer) SubmitCorrection(ctx context.Context, req *pb.Su
 }
 
 func (s *HumanValidationServer) DeleteTask(ctx context.Context, req *pb.DeleteTaskRequest) (*pb.DeleteTaskResponse, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	taskID := req.GetTaskId()
-	_, exists := s.tasks[taskID]
-	if !exists {
-		return nil, fmt.Errorf("task %s not found", taskID)
+	err := s.kv.Delete(ctx, taskID)
+	if err != nil {
+		if err == jetstream.ErrKeyNotFound {
+			return nil, status.Errorf(codes.NotFound, "task %s not found", taskID)
+		}
+		return nil, status.Errorf(codes.Internal, "failed to delete task %s: %v", taskID, err)
 	}
 
-	delete(s.tasks, taskID)
 	logger.Info("HumanValidation", "INFO: Deleted human validation task %s", taskID)
 
 	return &pb.DeleteTaskResponse{
@@ -212,9 +247,18 @@ func (s *HumanValidationServer) DeleteTask(ctx context.Context, req *pb.DeleteTa
 	}, nil
 }
 
-func (s *HumanValidationServer) rollbackTaskStatus(task *pb.PendingTask, status string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	logger.Info("HumanValidation", "INFO: Rolling back task %s to %s due to Orchestrator failure", task.GetTaskId(), status)
-	task.Status = status
+func (s *HumanValidationServer) rollbackTaskStatus(ctx context.Context, taskID string, statusName string) {
+	logger.Info("HumanValidation", "INFO: Rolling back task %s to %s due to Orchestrator failure", taskID, statusName)
+	entry, err := s.kv.Get(ctx, taskID)
+	if err != nil {
+		return
+	}
+	var task pb.PendingTask
+	if err := proto.Unmarshal(entry.Value(), &task); err == nil {
+		task.Status = statusName
+		taskBytes, _ := proto.Marshal(&task)
+		if _, err := s.kv.Update(ctx, taskID, taskBytes, entry.Revision()); err != nil {
+			logger.Error("HumanValidation", "Failed to rollback task status: %v", err)
+		}
+	}
 }

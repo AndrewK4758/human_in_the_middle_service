@@ -3,8 +3,8 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -30,13 +30,20 @@ type NatsServer struct {
 	nc               *nats.Conn
 	js               jetstream.JetStream
 	validationServer TaskCreator
+	consumerName     string
+	filterSubjects   []string
+	responsesStream  string
 }
 
 func NewNatsServer(nc *nats.Conn, js jetstream.JetStream, validationServer *HumanValidationServer) *NatsServer {
+	filterSubjectsStr := envutil.GetStringOrDefault("WORKERS_FILTER_SUBJECTS", "worker.human.validation,worker.human.validation.>")
 	return &NatsServer{
 		nc:               nc,
 		js:               js,
 		validationServer: validationServer,
+		consumerName:     envutil.GetStringOrDefault("WORKERS_CONSUMER_NAME", "human_validation_workers"),
+		filterSubjects:   strings.Split(filterSubjectsStr, ","),
+		responsesStream:  envutil.GetStringOrDefault("ORCHESTRATOR_RESPONSES_STREAM", "ORCHESTRATOR_RESPONSES"),
 	}
 }
 
@@ -47,9 +54,9 @@ func (s *NatsServer) Start(ctx context.Context) error {
 	var err error
 	for i := 0; i < 90; i++ {
 		cons, err = s.js.CreateOrUpdateConsumer(ctx, streamName, jetstream.ConsumerConfig{
-			Durable:        "human_validation_workers",
+			Durable:        s.consumerName,
 			AckPolicy:      jetstream.AckExplicitPolicy,
-			FilterSubjects: []string{"worker.human.validation", "worker.human.validation.>"},
+			FilterSubjects: s.filterSubjects,
 			MaxAckPending:  10,
 			AckWait:        1 * time.Minute,
 		})
@@ -91,42 +98,25 @@ func (s *NatsServer) processMessage(ctx context.Context, msg jetstream.Msg) {
 	var req pb.ExecuteTaskRequest
 	if err := proto.Unmarshal(msg.Data(), &req); err != nil {
 		logger.Error("HumanValidation", "Failed to unmarshal ExecuteTaskRequest: %v", err)
-		natsutil.LogJetStreamEvent(natsutil.JetStreamLogEvent{
-			Component:  "HumanValidation",
-			Event:      "NACKED",
-			Stream:     streamName,
-			Subject:    msg.Subject(),
-			Consumer:   "human_validation_workers",
-			TenantID:   t,
-			AppID:      a,
-			JobID:      j,
-			Attempt:    attempt,
-			DurationMs: time.Since(startTime).Milliseconds(),
-			Error:      err,
-		})
-		msg.NakWithDelay(5 * time.Second)
+		s.nackMessage(msg, streamName, t, a, j, attempt, startTime, err)
 		return
 	}
 
 	identityparser.NewIdentityParser(req.GetIdentity()).MustValidate(true, "HumanValidation_NatsWorker")
 
 	if req.GetTaskSubject() == "" {
-		panic(fmt.Errorf("action failed for job HumanValidation_NatsWorker: missing required TaskSubject"))
+		err := fmt.Errorf("action failed for job HumanValidation_NatsWorker: missing required TaskSubject")
+		s.nackMessage(msg, streamName, t, a, j, attempt, startTime, err)
+		return
 	}
 
 	t, a, j = natsutil.ExtractIdentity(req.Identity)
-
-	payloadMap := map[string]interface{}{}
-	if req.Payload != nil {
-		payloadMap = req.Payload.AsMap()
-	}
 
 	reqBytes, err := protojson.Marshal(&req)
 	if err == nil {
 		logger.Info("HumanValidation", "DEQUEUED Input Payload: %s", string(reqBytes))
 	} else {
-		payloadBytes, _ := json.Marshal(payloadMap)
-		logger.Info("HumanValidation", "DEQUEUED Input Payload: %s", string(payloadBytes))
+		logger.Info("HumanValidation", "DEQUEUED Input Payload (proto.MarshalText): %s", req.String())
 	}
 
 	parser := workflowparser.NewTaskRequestParser(&req)
@@ -138,35 +128,46 @@ func (s *NatsServer) processMessage(ctx context.Context, msg jetstream.Msg) {
 	stepId := req.StepId
 
 	var systemInstructions string
-	if executeTaskPayload.NodeConfig != nil {
-		systemInstructions = executeTaskPayload.NodeConfig.SystemInstructions
-	}
-
 	var expectedSchema *structpb.Struct
 	if executeTaskPayload.NodeConfig != nil {
+		systemInstructions = executeTaskPayload.NodeConfig.SystemInstructions
+		
 		if executeTaskPayload.NodeConfig.ExpectedSchemaStruct != nil {
 			expectedSchema = executeTaskPayload.NodeConfig.ExpectedSchemaStruct
 		} else if executeTaskPayload.NodeConfig.ExpectedSchema != "" {
 			expectedSchema = &structpb.Struct{}
-			_ = expectedSchema.UnmarshalJSON([]byte(executeTaskPayload.NodeConfig.ExpectedSchema))
+			err := expectedSchema.UnmarshalJSON([]byte(executeTaskPayload.NodeConfig.ExpectedSchema))
+			if err != nil {
+				logger.Error("HumanValidation", "Failed to unmarshal ExpectedSchema: %v", err)
+				s.nackMessage(msg, streamName, t, a, j, attempt, startTime, err)
+				return
+			}
 		}
 	}
 
-	var humanVal *pb.HumanValidationContract
-	humanVal = executeTaskPayload.HumanValidation
+	humanVal := executeTaskPayload.HumanValidation
 
 	var globalState *pb.GlobalState
 	if executeTaskPayload.GlobalState != nil {
-		b, _ := executeTaskPayload.GlobalState.MarshalJSON()
+		b, err := executeTaskPayload.GlobalState.MarshalJSON()
+		if err != nil {
+			logger.Error("HumanValidation", "Failed to marshal GlobalState: %v", err)
+			s.nackMessage(msg, streamName, t, a, j, attempt, startTime, err)
+			return
+		}
 		globalState = &pb.GlobalState{}
-		_ = protojson.Unmarshal(b, globalState)
+		if err := protojson.Unmarshal(b, globalState); err != nil {
+			logger.Error("HumanValidation", "Failed to unmarshal GlobalState: %v", err)
+			s.nackMessage(msg, streamName, t, a, j, attempt, startTime, err)
+			return
+		}
 	}
 
 	metadata := map[string]string{}
 	if executeTaskPayload.Metadata != nil {
-		for k, v := range executeTaskPayload.Metadata.AsMap() {
-			if strV, ok := v.(string); ok {
-				metadata[k] = strV
+		for k, v := range executeTaskPayload.Metadata.Fields {
+			if v.GetStringValue() != "" {
+				metadata[k] = v.GetStringValue()
 			}
 		}
 	}
@@ -176,7 +177,7 @@ func (s *NatsServer) processMessage(ctx context.Context, msg jetstream.Msg) {
 		Event:     "DEQUEUED",
 		Stream:    streamName,
 		Subject:   msg.Subject(),
-		Consumer:  "human_validation_workers",
+		Consumer:  s.consumerName,
 		TenantID:  t,
 		AppID:     a,
 		JobID:     j,
@@ -184,13 +185,11 @@ func (s *NatsServer) processMessage(ctx context.Context, msg jetstream.Msg) {
 		Attempt:   attempt,
 	})
 
-	hRequired := false
-	hBypassFallback := false
 	if humanVal != nil {
-		hRequired = humanVal.GetRequired()
-		hBypassFallback = humanVal.GetBypassFallback()
+		logger.Info("HumanValidation", "HumanValidation contract flags - Required: %v, BypassFallback: %v for step '%s' (ID: %s)", humanVal.GetRequired(), humanVal.GetBypassFallback(), stepName, stepId)
+	} else {
+		logger.Info("HumanValidation", "HumanValidation contract not provided for step '%s' (ID: %s)", stepName, stepId)
 	}
-	logger.Info("HumanValidation", "HumanValidation contract flags - Required: %v, BypassFallback: %v for step '%s' (ID: %s)", hRequired, hBypassFallback, stepName, stepId)
 
 	createReq := &pb.CreateTaskRequest{
 		Identity:           req.Identity,
@@ -207,20 +206,7 @@ func (s *NatsServer) processMessage(ctx context.Context, msg jetstream.Msg) {
 		resp, err := s.validationServer.CreateValidationTask(ctx, createReq)
 		if err != nil {
 			logger.Error("HumanValidation", "Failed to create validation task: %v", err)
-			natsutil.LogJetStreamEvent(natsutil.JetStreamLogEvent{
-				Component:  "HumanValidation",
-				Event:      "NACKED",
-				Stream:     streamName,
-				Subject:    msg.Subject(),
-				Consumer:   "human_validation_workers",
-				TenantID:   t,
-				AppID:      a,
-				JobID:      j,
-				Attempt:    attempt,
-				DurationMs: time.Since(startTime).Milliseconds(),
-				Error:      err,
-			})
-			msg.NakWithDelay(5 * time.Second)
+			s.nackMessage(msg, streamName, t, a, j, attempt, startTime, err)
 			return
 		}
 		logger.Info("HumanValidation", "Successfully registered pending validation task %s with status %s", resp.GetTaskId(), resp.GetStatus())
@@ -259,28 +245,14 @@ func (s *NatsServer) processMessage(ctx context.Context, msg jetstream.Msg) {
 			if err == nil {
 				logger.Info("HumanValidation", "DISPATCHING Output Payload: %s", string(outBytes))
 			} else {
-				outJson, _ := json.Marshal(resp.ErrorContract.ClientPayload.AsMap())
-				logger.Info("HumanValidation", "DISPATCHING Output Payload: %s", string(outJson))
+				logger.Info("HumanValidation", "DISPATCHING Output Payload (proto): %s", resp.ErrorContract.ClientPayload.String())
 			}
 		}
 
 		respBytes, err := proto.Marshal(resp)
 		if err != nil {
 			logger.Info("HumanValidation", "Failed to marshal response: %v", err)
-			natsutil.LogJetStreamEvent(natsutil.JetStreamLogEvent{
-				Component:  "HumanValidation",
-				Event:      "NACKED",
-				Stream:     streamName,
-				Subject:    msg.Subject(),
-				Consumer:   "human_validation_workers",
-				TenantID:   t,
-				AppID:      a,
-				JobID:      j,
-				Attempt:    attempt,
-				DurationMs: time.Since(startTime).Milliseconds(),
-				Error:      err,
-			})
-			msg.NakWithDelay(5 * time.Second)
+			s.nackMessage(msg, streamName, t, a, j, attempt, startTime, err)
 			return
 		}
 
@@ -288,7 +260,7 @@ func (s *NatsServer) processMessage(ctx context.Context, msg jetstream.Msg) {
 		natsutil.LogJetStreamEvent(natsutil.JetStreamLogEvent{
 			Component: "HumanValidation",
 			Event:     "ENQUEUED",
-			Stream:    "ORCHESTRATOR_RESPONSES",
+			Stream:    s.responsesStream,
 			Subject:   replySubj,
 			TenantID:  t,
 			AppID:     a,
@@ -298,20 +270,7 @@ func (s *NatsServer) processMessage(ctx context.Context, msg jetstream.Msg) {
 		})
 		if pubErr != nil {
 			logger.Info("HumanValidation", "Failed to publish reply to NATS %s: %v", replySubj, pubErr)
-			natsutil.LogJetStreamEvent(natsutil.JetStreamLogEvent{
-				Component:  "HumanValidation",
-				Event:      "NACKED",
-				Stream:     streamName,
-				Subject:    msg.Subject(),
-				Consumer:   "human_validation_workers",
-				TenantID:   t,
-				AppID:      a,
-				JobID:      j,
-				Attempt:    attempt,
-				DurationMs: time.Since(startTime).Milliseconds(),
-				Error:      pubErr,
-			})
-			msg.NakWithDelay(5 * time.Second)
+			s.nackMessage(msg, streamName, t, a, j, attempt, startTime, pubErr)
 			return
 		}
 	}
@@ -326,7 +285,7 @@ func (s *NatsServer) processMessage(ctx context.Context, msg jetstream.Msg) {
 			Event:      "ACKNOWLEDGED",
 			Stream:     streamName,
 			Subject:    msg.Subject(),
-			Consumer:   "human_validation_workers",
+			Consumer:   s.consumerName,
 			TenantID:   t,
 			AppID:      a,
 			JobID:      j,
@@ -334,4 +293,21 @@ func (s *NatsServer) processMessage(ctx context.Context, msg jetstream.Msg) {
 			DurationMs: durationMs,
 		})
 	}
+}
+
+func (s *NatsServer) nackMessage(msg jetstream.Msg, streamName, t, a, j string, attempt uint64, startTime time.Time, err error) {
+	natsutil.LogJetStreamEvent(natsutil.JetStreamLogEvent{
+		Component:  "HumanValidation",
+		Event:      "NACKED",
+		Stream:     streamName,
+		Subject:    msg.Subject(),
+		Consumer:   s.consumerName,
+		TenantID:   t,
+		AppID:      a,
+		JobID:      j,
+		Attempt:    attempt,
+		DurationMs: time.Since(startTime).Milliseconds(),
+		Error:      err,
+	})
+	msg.NakWithDelay(5 * time.Second)
 }
