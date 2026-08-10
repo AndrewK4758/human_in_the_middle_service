@@ -134,14 +134,6 @@ func (s *NatsServer) processMessage(ctx context.Context, msg jetstream.Msg) {
 		
 		if executeTaskPayload.NodeConfig.ExpectedSchemaStruct != nil {
 			expectedSchema = executeTaskPayload.NodeConfig.ExpectedSchemaStruct
-		} else if executeTaskPayload.NodeConfig.ExpectedSchema != "" {
-			expectedSchema = &structpb.Struct{}
-			err := expectedSchema.UnmarshalJSON([]byte(executeTaskPayload.NodeConfig.ExpectedSchema))
-			if err != nil {
-				logger.Error("HumanValidation", "Failed to unmarshal ExpectedSchema: %v", err)
-				s.nackMessage(msg, streamName, t, a, j, attempt, startTime, err)
-				return
-			}
 		}
 	}
 
