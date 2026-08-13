@@ -1,6 +1,5 @@
 package server
 
-
 import (
 	"context"
 	"encoding/json"
@@ -10,10 +9,12 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/grpc"
+
 	pb "github.com/AndrewK4758/shared_protos"
 	"github.com/nats-io/nats.go"
-	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/structpb"
 )
 
@@ -30,13 +31,14 @@ func TestChallenger_SubmitCorrection_EdgeCases(t *testing.T) {
 	mockOrch := &mockOrchestratorServer{}
 	addr, cleanup := startMockOrchestrator(t, mockOrch)
 	defer cleanup()
-
-	s := NewHumanValidationServer(addr)
+	conn, _ := grpc.Dial(addr, grpc.WithInsecure())
+	defer conn.Close()
+	s := NewHumanValidationServer(&mockJetStreamForServer{}, pb.NewOrchestratorServiceClient(conn))
 	ctx := context.Background()
 
 	// 1.1 Non-existent Task ID
 	_, err := s.SubmitCorrection(ctx, &pb.SubmitCorrectionRequest{
-		TaskId:        "non_existent_123",
+		TaskId:    "non_existent_123",
 		Corrected: unmarshalStruct(`{"key": "value"}`),
 	})
 	if err == nil || !strings.Contains(err.Error(), "not found") {
@@ -45,7 +47,7 @@ func TestChallenger_SubmitCorrection_EdgeCases(t *testing.T) {
 
 	// 1.2 Empty Task ID
 	_, err = s.SubmitCorrection(ctx, &pb.SubmitCorrectionRequest{
-		TaskId:        "",
+		TaskId:    "",
 		Corrected: unmarshalStruct(`{"key": "value"}`),
 	})
 	if err == nil || !strings.Contains(err.Error(), "missing required taskId") {
@@ -73,7 +75,7 @@ func TestChallenger_SubmitCorrection_EdgeCases(t *testing.T) {
 			AppId:    "app_status",
 			JobId:    "job_status_test",
 		},
-		StepId:   "step_status",
+		StepId: "step_status",
 	})
 	if err != nil {
 		t.Fatalf("Failed to create task: %v", err)
@@ -88,12 +90,10 @@ func TestChallenger_SubmitCorrection_EdgeCases(t *testing.T) {
 	}
 
 	for _, invalidStatus := range invalidStatuses {
-		s.mu.Lock()
-		s.tasks[taskIdStatus].Status = invalidStatus
-		s.mu.Unlock()
+		setTaskStatus(s, taskIdStatus, invalidStatus)
 
 		_, err := s.SubmitCorrection(ctx, &pb.SubmitCorrectionRequest{
-			TaskId:        taskIdStatus,
+			TaskId:    taskIdStatus,
 			Corrected: unmarshalStruct(`{"fixed": true}`),
 		})
 		if err == nil {
@@ -104,19 +104,18 @@ func TestChallenger_SubmitCorrection_EdgeCases(t *testing.T) {
 	}
 
 	// 1.5 2MB payload within default gRPC limits
-	s.mu.Lock()
-	s.tasks[taskIdStatus].Status = TaskStatusPending
-	s.mu.Unlock()
+	setTaskStatus(s, taskIdStatus, TaskStatusPending)
 
 	largeJson2MB := `{"large_field": "` + strings.Repeat("A", 2*1024*1024) + `", "unicode": "こんにちは世界 🚀 \n\t\""}`
 	var receivedJson string
-	mockOrch.resumeJobFunc = func(ctx context.Context, req *pb.ResumeJobRequest) (*pb.ResumeJobResponse, error) {
-		b, _ := protojson.Marshal(req.GetCorrected()); receivedJson = string(b)
+	mockOrch.resumeJobFunc = func(ctx context.Context, req *pb.ResumeJobRequest, opts ...grpc.CallOption) (*pb.ResumeJobResponse, error) {
+		b, _ := protojson.Marshal(req.GetCorrected())
+		receivedJson = string(b)
 		return &pb.ResumeJobResponse{Success: true, Message: "large json received"}, nil
 	}
 
 	respLarge, err := s.SubmitCorrection(ctx, &pb.SubmitCorrectionRequest{
-		TaskId:        taskIdStatus,
+		TaskId:    taskIdStatus,
 		Corrected: unmarshalStruct(largeJson2MB),
 	})
 	if err != nil {
@@ -138,13 +137,13 @@ func TestChallenger_SubmitCorrection_EdgeCases(t *testing.T) {
 			AppId:    "app_exceed",
 			JobId:    "job_exceed_4mb",
 		},
-		StepId:   "step_exceed",
+		StepId: "step_exceed",
 	})
 	taskIdExceed := createRespExceed.GetTaskId()
 
 	payload5MB := `{"large_field": "` + strings.Repeat("B", 5*1024*1024) + `"}`
 	_, errExceed := s.SubmitCorrection(ctx, &pb.SubmitCorrectionRequest{
-		TaskId:        taskIdExceed,
+		TaskId:    taskIdExceed,
 		Corrected: unmarshalStruct(payload5MB),
 	})
 	if errExceed == nil {
@@ -154,16 +153,14 @@ func TestChallenger_SubmitCorrection_EdgeCases(t *testing.T) {
 		t.Logf("gRPC error: %v", errExceed)
 	}
 
-	s.mu.RLock()
-	statusExceed := s.tasks[taskIdExceed].Status
-	s.mu.RUnlock()
+	statusExceed := getTask(s, taskIdExceed).Status
 	if statusExceed != TaskStatusPending {
 		t.Fatalf("Expected status rolled back to PENDING when >4MB payload fails gRPC limit, got: %s", statusExceed)
 	}
 }
 
 func TestChallenger_NatsServer_ProcessMessage_EdgeCases(t *testing.T) {
-	valServer := NewHumanValidationServer("localhost:11112")
+	valServer := NewHumanValidationServer(&mockJetStreamForServer{}, nil)
 	mockJS := newMockJetStream()
 
 	natsServer := &NatsServer{
@@ -215,14 +212,14 @@ func TestChallenger_NatsServer_ProcessMessage_EdgeCases(t *testing.T) {
 	headers := nats.Header{}
 	headers.Set("Reply-Subject", "orchestrator.reply.fail")
 	validReq := &pb.ExecuteTaskRequest{
-		Identity: &pb.InfrastructureIdentity{TenantId: "t", AppId: "a", JobId: "j"},
+		Identity:    &pb.InfrastructureIdentity{TenantId: "t", AppId: "a", JobId: "j"},
 		TaskSubject: "worker.human.validation",
 		Payload: &structpb.Struct{
 			Fields: map[string]*structpb.Value{
 				"node_config": structpb.NewStructValue(&structpb.Struct{
 					Fields: map[string]*structpb.Value{
-						"node_name": structpb.NewStringValue("TestNode"),
-						"system_instructions": structpb.NewStringValue("instructions"), 
+						"node_name":              structpb.NewStringValue("TestNode"),
+						"system_instructions":    structpb.NewStringValue("instructions"),
 						"expected_schema_struct": structpb.NewStructValue(&structpb.Struct{}),
 					},
 				}),
@@ -235,7 +232,7 @@ func TestChallenger_NatsServer_ProcessMessage_EdgeCases(t *testing.T) {
 		},
 	}
 	validReqBytes, _ := proto.Marshal(validReq)
-	
+
 	msgReplyFail := &mockMsg{
 		data:    validReqBytes,
 		subject: "worker.human.validation",
@@ -259,8 +256,10 @@ func TestChallenger_OrchestratorDisconnectAndRollback(t *testing.T) {
 	// Start mock orchestrator on a dynamic port
 	mockOrch := &mockOrchestratorServer{}
 	addr, cleanup := startMockOrchestrator(t, mockOrch)
-
-	s := NewHumanValidationServer(addr)
+	defer cleanup()
+	conn, _ := grpc.Dial(addr, grpc.WithInsecure())
+	defer conn.Close()
+	s := NewHumanValidationServer(&mockJetStreamForServer{}, pb.NewOrchestratorServiceClient(conn))
 	ctx := context.Background()
 
 	// Create task
@@ -270,7 +269,7 @@ func TestChallenger_OrchestratorDisconnectAndRollback(t *testing.T) {
 			AppId:    "app_disc",
 			JobId:    "job_disconnect_test",
 		},
-		StepId:   "step_disc",
+		StepId: "step_disc",
 	})
 	if err != nil {
 		t.Fatalf("Failed to create task: %v", err)
@@ -281,7 +280,7 @@ func TestChallenger_OrchestratorDisconnectAndRollback(t *testing.T) {
 	cleanup() // closes listener and stops server
 
 	_, err = s.SubmitCorrection(ctx, &pb.SubmitCorrectionRequest{
-		TaskId:        taskId,
+		TaskId:    taskId,
 		Corrected: unmarshalStruct(`{"data": 1}`),
 	})
 	if err == nil {
@@ -289,27 +288,21 @@ func TestChallenger_OrchestratorDisconnectAndRollback(t *testing.T) {
 	}
 
 	// Verify rollback to PENDING
-	s.mu.RLock()
-	statusAfterCrash := s.tasks[taskId].Status
-	s.mu.RUnlock()
+	statusAfterCrash := getTask(s, taskId).Status
 
 	if statusAfterCrash != TaskStatusPending {
 		t.Fatalf("Expected task status rolled back to PENDING after server crash, got: %s", statusAfterCrash)
 	}
 
 	// 2.2 Re-start orchestrator on a NEW dynamic address, update server orchestratorAddr, retry
-	mockOrch2 := &mockOrchestratorServer{
-		resumeJobFunc: func(ctx context.Context, req *pb.ResumeJobRequest) (*pb.ResumeJobResponse, error) {
-			return &pb.ResumeJobResponse{Success: true, Message: "re-established"}, nil
-		},
-	}
+	mockOrch2 := &mockOrchestratorServer{}
 	newAddr, cleanup2 := startMockOrchestrator(t, mockOrch2)
 	defer cleanup2()
-
-	s.orchestratorAddr = newAddr
-
+	conn2, _ := grpc.Dial(newAddr, grpc.WithInsecure())
+	defer conn2.Close()
+	s.orchClient = pb.NewOrchestratorServiceClient(conn2)
 	resp, err := s.SubmitCorrection(ctx, &pb.SubmitCorrectionRequest{
-		TaskId:        taskId,
+		TaskId:    taskId,
 		Corrected: unmarshalStruct(`{"data": 1}`),
 	})
 	if err != nil {
@@ -319,9 +312,7 @@ func TestChallenger_OrchestratorDisconnectAndRollback(t *testing.T) {
 		t.Fatalf("Expected success after orchestrator recovery")
 	}
 
-	s.mu.RLock()
-	finalStatus := s.tasks[taskId].Status
-	s.mu.RUnlock()
+	finalStatus := getTask(s, taskId).Status
 	if finalStatus != TaskStatusResolved {
 		t.Fatalf("Expected final status RESOLVED after recovery, got: %s", finalStatus)
 	}
@@ -333,12 +324,12 @@ func TestChallenger_OrchestratorDisconnectAndRollback(t *testing.T) {
 			AppId:    "app_timeout",
 			JobId:    "job_ctx_timeout",
 		},
-		StepId:   "step_timeout",
+		StepId: "step_timeout",
 	})
 	taskIdTimeout := createResp3.GetTaskId()
 
 	// Mock orchestrator that hangs until context is done
-	mockOrch2.resumeJobFunc = func(ctx context.Context, req *pb.ResumeJobRequest) (*pb.ResumeJobResponse, error) {
+	mockOrch2.resumeJobFunc = func(ctx context.Context, req *pb.ResumeJobRequest, opts ...grpc.CallOption) (*pb.ResumeJobResponse, error) {
 		<-ctx.Done()
 		return nil, ctx.Err()
 	}
@@ -347,16 +338,14 @@ func TestChallenger_OrchestratorDisconnectAndRollback(t *testing.T) {
 	defer cancel()
 
 	_, err = s.SubmitCorrection(shortCtx, &pb.SubmitCorrectionRequest{
-		TaskId:        taskIdTimeout,
+		TaskId:    taskIdTimeout,
 		Corrected: unmarshalStruct(`{"data": 2}`),
 	})
 	if err == nil {
 		t.Fatalf("Expected error when context times out during ResumeJob")
 	}
 
-	s.mu.RLock()
-	statusAfterTimeout := s.tasks[taskIdTimeout].Status
-	s.mu.RUnlock()
+	statusAfterTimeout := getTask(s, taskIdTimeout).Status
 
 	if statusAfterTimeout != TaskStatusPending {
 		t.Fatalf("Expected status rolled back to PENDING after context timeout, got: %s", statusAfterTimeout)
@@ -368,7 +357,7 @@ func TestChallenger_OrchestratorDisconnectAndRollback(t *testing.T) {
 // -----------------------------------------------------------------------------
 
 func TestChallenger_StringPreservationFidelity(t *testing.T) {
-	valServer := NewHumanValidationServer("localhost:11112")
+	valServer := NewHumanValidationServer(&mockJetStreamForServer{}, nil)
 	mockJS := newMockJetStream()
 
 	natsServer := &NatsServer{
@@ -415,9 +404,9 @@ func TestChallenger_StringPreservationFidelity(t *testing.T) {
 
 	payloadMap := map[string]interface{}{
 		"node_config": map[string]interface{}{
-			"node_name": "FidelityCheckNode",
-			"expected_schema_struct": complexSchemaMap, 
-			"system_instructions": complexPrompt,
+			"node_name":              "FidelityCheckNode",
+			"expected_schema_struct": complexSchemaMap,
+			"system_instructions":    complexPrompt,
 		},
 		"global_state": map[string]interface{}{
 			"functional": gsMap,
@@ -487,12 +476,4 @@ func TestChallenger_StringPreservationFidelity(t *testing.T) {
 	if !strings.Contains(fmt.Sprintf("%v", globalStateJSON), "doc_9999_xyz") || !strings.Contains(fmt.Sprintf("%v", globalStateJSON), "finance") {
 		t.Errorf("GlobalStateJson missing expected fields: %s", globalStateJSON)
 	}
-}
-
-func unmarshalStruct(jsonStr string) *structpb.Struct {
-	var s structpb.Struct
-	if err := protojson.Unmarshal([]byte(jsonStr), &s); err != nil {
-		panic(err)
-	}
-	return &s
 }

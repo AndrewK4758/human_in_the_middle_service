@@ -1,9 +1,9 @@
 package server
 
-
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -48,10 +48,10 @@ type mockMsg struct {
 	nakDelay time.Duration
 }
 
-func (m *mockMsg) Data() []byte { return m.data }
-func (m *mockMsg) Subject() string { return m.subject }
+func (m *mockMsg) Data() []byte         { return m.data }
+func (m *mockMsg) Subject() string      { return m.subject }
 func (m *mockMsg) Headers() nats.Header { return m.headers }
-func (m *mockMsg) Reply() string { return "" }
+func (m *mockMsg) Reply() string        { return "" }
 func (m *mockMsg) Metadata() (*jetstream.MsgMetadata, error) {
 	return &jetstream.MsgMetadata{NumDelivered: 1}, nil
 }
@@ -82,8 +82,12 @@ func (m *mockMsg) TermWithReason(reason string) error {
 	return nil
 }
 
+func init() {
+	os.Setenv("WORKERS_STREAM", "WORKERS")
+}
+
 func TestNatsServer_ProcessMessage_SuccessAndTaskCreation(t *testing.T) {
-	valServer := NewHumanValidationServer("localhost:11112")
+	valServer := newMockHumanValidationServer()
 	mockJS := newMockJetStream()
 
 	natsServer := &NatsServer{
@@ -97,17 +101,17 @@ func TestNatsServer_ProcessMessage_SuccessAndTaskCreation(t *testing.T) {
 
 	payloadMap := map[string]interface{}{
 		"node_config": map[string]interface{}{
-			"node_name":           "ClassificationNode",
-			"expected_schema_struct": expectedSchemaMap, 
-			"system_instructions": "Classify incoming document",
+			"node_name":              "ClassificationNode",
+			"expected_schema_struct": expectedSchemaMap,
+			"system_instructions":    "Classify incoming document",
 		},
 		"human_validation": map[string]interface{}{
 			"required":        true,
 			"bypass_fallback": false,
 		},
-		"global_state":        map[string]interface{}{
+		"global_state": map[string]interface{}{
 			"functional": map[string]interface{}{
-				"step_id":             "step_classify_1",
+				"step_id": "step_classify_1",
 			},
 		},
 		"metadata": map[string]interface{}{
@@ -181,7 +185,7 @@ func TestNatsServer_ProcessMessage_SuccessAndTaskCreation(t *testing.T) {
 }
 
 func TestNatsServer_ProcessMessage_PerformActionResponseWithErrorContract(t *testing.T) {
-	valServer := NewHumanValidationServer("localhost:11112")
+	valServer := newMockHumanValidationServer()
 	mockJS := newMockJetStream()
 
 	natsServer := &NatsServer{
@@ -192,11 +196,11 @@ func TestNatsServer_ProcessMessage_PerformActionResponseWithErrorContract(t *tes
 
 	payloadStruct, err := structpb.NewStruct(map[string]interface{}{
 		"node_config": map[string]interface{}{
-			"node_name":       "HumanValidationStep",
+			"node_name": "HumanValidationStep",
 		},
 		"global_state": map[string]interface{}{
 			"functional": map[string]interface{}{
-				"step_id":         "step_val_2",
+				"step_id": "step_val_2",
 			},
 		},
 	})
@@ -285,7 +289,7 @@ func TestNatsServer_ProcessMessage_PerformActionResponseWithErrorContract(t *tes
 }
 
 func TestNatsServer_ProcessMessage_InvalidProtobufBytes(t *testing.T) {
-	valServer := NewHumanValidationServer("localhost:11112")
+	valServer := newMockHumanValidationServer()
 	mockJS := newMockJetStream()
 
 	natsServer := &NatsServer{
@@ -311,7 +315,7 @@ func TestNatsServer_ProcessMessage_InvalidProtobufBytes(t *testing.T) {
 }
 
 func TestNatsServer_ProcessMessage_GraphIdAndInitialNodeIdExtraction(t *testing.T) {
-	valServer := NewHumanValidationServer("localhost:11112")
+	valServer := newMockHumanValidationServer()
 	mockJS := newMockJetStream()
 
 	natsServer := &NatsServer{
@@ -322,11 +326,11 @@ func TestNatsServer_ProcessMessage_GraphIdAndInitialNodeIdExtraction(t *testing.
 
 	payloadStruct, err := structpb.NewStruct(map[string]interface{}{
 		"node_config": map[string]interface{}{
-			"node_name":       "ExtractionNode",
+			"node_name": "ExtractionNode",
 		},
 		"global_state": map[string]interface{}{
 			"functional": map[string]interface{}{
-				"step_id":         "step_extract_1",
+				"step_id": "step_extract_1",
 			},
 		},
 	})
@@ -371,7 +375,7 @@ func TestNatsServer_ProcessMessage_GraphIdAndInitialNodeIdExtraction(t *testing.
 }
 
 func TestNatsServer_ProcessMessage_MissingIdentityFailFast(t *testing.T) {
-	valServer := NewHumanValidationServer("localhost:11112")
+	valServer := newMockHumanValidationServer()
 	mockJS := newMockJetStream()
 
 	natsServer := &NatsServer{
@@ -383,11 +387,11 @@ func TestNatsServer_ProcessMessage_MissingIdentityFailFast(t *testing.T) {
 	// Request with missing identity
 	payloadStruct, _ := structpb.NewStruct(map[string]interface{}{
 		"node_config": map[string]interface{}{
-			"node_name":       "NoIdentityNode",
+			"node_name": "NoIdentityNode",
 		},
 		"global_state": map[string]interface{}{
 			"functional": map[string]interface{}{
-				"step_id":   "step_no_identity",
+				"step_id": "step_no_identity",
 			},
 		},
 	})
@@ -418,4 +422,42 @@ func TestNatsServer_ProcessMessage_MissingIdentityFailFast(t *testing.T) {
 	}()
 }
 
+type mockHumanValidationServer struct {
+	mu    sync.RWMutex
+	tasks map[string]*pb.PendingTask
+}
 
+func newMockHumanValidationServer() *mockHumanValidationServer {
+	return &mockHumanValidationServer{tasks: make(map[string]*pb.PendingTask)}
+}
+
+func (m *mockHumanValidationServer) CreateValidationTask(ctx context.Context, req *pb.CreateTaskRequest) (*pb.CreateTaskResponse, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	taskID := "mock-task-123"
+	m.tasks[taskID] = &pb.PendingTask{
+		TaskId:             taskID,
+		Identity:           req.GetIdentity(),
+		StepName:           req.GetStepName(),
+		PromptInstructions: req.GetPromptInstructions(),
+		ExpectedSchema:     req.GetExpectedSchema(),
+		Status:             TaskStatusPending,
+		StepId:             req.GetStepId(),
+	}
+	return &pb.CreateTaskResponse{TaskId: taskID, Status: TaskStatusCreated}, nil
+}
+
+func TestHandleMessageWithRecovery_Panic_NakWithDelay(t *testing.T) {
+	server := &NatsServer{}
+	msg := &mockMsg{
+		subject: "worker.doc.test",
+	}
+	sem := make(chan struct{}, 1)
+
+	// processMessage panics because req is empty (GetTaskSubject == "")
+	server.HandleMessageWithRecovery(context.Background(), msg, sem)
+
+	if !msg.nacked {
+		t.Errorf("Expected NakWithDelay to be called on panic")
+	}
+}

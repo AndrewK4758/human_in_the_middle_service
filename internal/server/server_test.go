@@ -11,7 +11,7 @@ import (
 )
 
 func TestHumanValidationServer_CreateAndList(t *testing.T) {
-	s := NewHumanValidationServer("localhost:11112")
+	s := NewHumanValidationServer(&mockJetStreamForServer{}, nil)
 
 	ctx := context.Background()
 
@@ -75,8 +75,12 @@ func (m *mockGetPendingTasksServer) Send(task *pb.PendingTask) error {
 	return nil
 }
 
+func (m *mockGetPendingTasksServer) Context() context.Context {
+	return context.Background()
+}
+
 func TestHumanValidationServer_DeleteTask(t *testing.T) {
-	s := NewHumanValidationServer("localhost:11112")
+	s := NewHumanValidationServer(&mockJetStreamForServer{}, nil)
 	ctx := context.Background()
 
 	// 1. Create a task
@@ -110,7 +114,7 @@ func TestHumanValidationServer_DeleteTask(t *testing.T) {
 	}
 
 	// 3. Verify it's deleted
-	if _, exists := s.tasks[taskID]; exists {
+	if _, err := s.kv.Get(context.Background(), taskID); err == nil {
 		t.Fatalf("Expected task to be deleted from map")
 	}
 
@@ -122,7 +126,7 @@ func TestHumanValidationServer_DeleteTask(t *testing.T) {
 }
 
 func TestHumanValidationServer_CreateValidationTask_Idempotency(t *testing.T) {
-	s := NewHumanValidationServer("localhost:11112")
+	s := NewHumanValidationServer(&mockJetStreamForServer{}, nil)
 	ctx := context.Background()
 
 	tests := []struct {
@@ -191,7 +195,7 @@ func TestHumanValidationServer_CreateValidationTask_Idempotency(t *testing.T) {
 
 			var resp *pb.CreateTaskResponse
 			var err error
-			
+
 			if tt.expectedPanic {
 				func() {
 					defer func() {
@@ -205,7 +209,7 @@ func TestHumanValidationServer_CreateValidationTask_Idempotency(t *testing.T) {
 			} else {
 				resp, err = s.CreateValidationTask(ctx, req)
 			}
-			
+
 			if err != nil {
 				t.Fatalf("Failed to create task: %v", err)
 			}
@@ -222,8 +226,8 @@ func TestHumanValidationServer_CreateValidationTask_Idempotency(t *testing.T) {
 				}
 			}
 
-			if len(s.tasks) != tt.expectedCount {
-				t.Errorf("Expected map size %d, got %d", tt.expectedCount, len(s.tasks))
+			if countTasks(s) != tt.expectedCount {
+				t.Errorf("Expected map size %d, got %d", tt.expectedCount, countTasks(s))
 			}
 		})
 	}
@@ -231,7 +235,7 @@ func TestHumanValidationServer_CreateValidationTask_Idempotency(t *testing.T) {
 
 type mockOrchestratorServer struct {
 	pb.UnimplementedOrchestratorServiceServer
-	resumeJobFunc func(ctx context.Context, req *pb.ResumeJobRequest) (*pb.ResumeJobResponse, error)
+	resumeJobFunc func(ctx context.Context, req *pb.ResumeJobRequest, opts ...grpc.CallOption) (*pb.ResumeJobResponse, error)
 }
 
 func (m *mockOrchestratorServer) ResumeJob(ctx context.Context, req *pb.ResumeJobRequest) (*pb.ResumeJobResponse, error) {
@@ -263,16 +267,14 @@ func startMockOrchestrator(t *testing.T, mock *mockOrchestratorServer) (string, 
 }
 
 func TestHumanValidationServer_SubmitCorrection(t *testing.T) {
-	mockOrch := &mockOrchestratorServer{}
-	addr, cleanup := startMockOrchestrator(t, mockOrch)
-	defer cleanup()
+	mockOrch := &mockOrchClient{}
 
-	s := NewHumanValidationServer(addr)
+	s := NewHumanValidationServer(&mockJetStreamForServer{}, mockOrch)
 	ctx := context.Background()
 
 	t.Run("Task Not Found Error Handling", func(t *testing.T) {
 		_, err := s.SubmitCorrection(ctx, &pb.SubmitCorrectionRequest{
-			TaskId:        "task_non_existent",
+			TaskId:    "task_non_existent",
 			Corrected: unmarshalStruct(`{"status":"ok"}`),
 		})
 		if err == nil {
@@ -294,9 +296,7 @@ func TestHumanValidationServer_SubmitCorrection(t *testing.T) {
 		}
 		taskId := createResp.GetTaskId()
 
-		s.mu.Lock()
-		s.tasks[taskId].Status = TaskStatusProcessing
-		s.mu.Unlock()
+		setTaskStatus(s, taskId, TaskStatusProcessing)
 
 		_, err = s.SubmitCorrection(ctx, &pb.SubmitCorrectionRequest{
 			TaskId:    taskId,
@@ -308,7 +308,7 @@ func TestHumanValidationServer_SubmitCorrection(t *testing.T) {
 	})
 
 	t.Run("Orchestrator ResumeJob Success -> Status Resolved", func(t *testing.T) {
-		mockOrch.resumeJobFunc = func(ctx context.Context, req *pb.ResumeJobRequest) (*pb.ResumeJobResponse, error) {
+		mockOrch.resumeJobFunc = func(ctx context.Context, req *pb.ResumeJobRequest, opts ...grpc.CallOption) (*pb.ResumeJobResponse, error) {
 			if req.GetStepId() != "step_succ" {
 				return nil, fmt.Errorf("unexpected step id %s", req.GetStepId())
 			}
@@ -339,9 +339,7 @@ func TestHumanValidationServer_SubmitCorrection(t *testing.T) {
 			t.Fatalf("Expected response success true, got false")
 		}
 
-		s.mu.RLock()
-		task := s.tasks[taskId]
-		s.mu.RUnlock()
+		task := getTask(s, taskId)
 
 		if task.Status != TaskStatusResolved {
 			t.Fatalf("Expected task status %s, got %s", TaskStatusResolved, task.Status)
@@ -362,9 +360,7 @@ func TestHumanValidationServer_SubmitCorrection(t *testing.T) {
 		}
 		taskId := createResp.GetTaskId()
 
-		s.mu.Lock()
-		s.tasks[taskId].Status = TaskStatusResolved
-		s.mu.Unlock()
+		setTaskStatus(s, taskId, TaskStatusResolved)
 
 		resp, err := s.SubmitCorrection(ctx, &pb.SubmitCorrectionRequest{
 			TaskId:    taskId,
@@ -379,7 +375,7 @@ func TestHumanValidationServer_SubmitCorrection(t *testing.T) {
 	})
 
 	t.Run("Orchestrator ResumeJob Failure (gRPC Error) -> Task Status Rollback to Pending", func(t *testing.T) {
-		mockOrch.resumeJobFunc = func(ctx context.Context, req *pb.ResumeJobRequest) (*pb.ResumeJobResponse, error) {
+		mockOrch.resumeJobFunc = func(ctx context.Context, req *pb.ResumeJobRequest, opts ...grpc.CallOption) (*pb.ResumeJobResponse, error) {
 			return nil, fmt.Errorf("orchestrator connection timeout")
 		}
 
@@ -404,9 +400,7 @@ func TestHumanValidationServer_SubmitCorrection(t *testing.T) {
 			t.Fatalf("Expected error when orchestrator ResumeJob returns error")
 		}
 
-		s.mu.RLock()
-		task := s.tasks[taskId]
-		s.mu.RUnlock()
+		task := getTask(s, taskId)
 
 		if task.Status != TaskStatusPending {
 			t.Fatalf("Expected status rolled back to %s, got %s", TaskStatusPending, task.Status)
@@ -414,7 +408,7 @@ func TestHumanValidationServer_SubmitCorrection(t *testing.T) {
 	})
 
 	t.Run("Orchestrator ResumeJob Failure (Success=false) -> Task Status Rollback to Pending", func(t *testing.T) {
-		mockOrch.resumeJobFunc = func(ctx context.Context, req *pb.ResumeJobRequest) (*pb.ResumeJobResponse, error) {
+		mockOrch.resumeJobFunc = func(ctx context.Context, req *pb.ResumeJobRequest, opts ...grpc.CallOption) (*pb.ResumeJobResponse, error) {
 			return &pb.ResumeJobResponse{Success: false, Message: "validation invalid"}, nil
 		}
 
@@ -432,7 +426,7 @@ func TestHumanValidationServer_SubmitCorrection(t *testing.T) {
 		taskId := createResp.GetTaskId()
 
 		resp, err := s.SubmitCorrection(ctx, &pb.SubmitCorrectionRequest{
-			TaskId:        taskId,
+			TaskId:    taskId,
 			Corrected: unmarshalStruct(`{"corrected": true}`),
 		})
 		if err != nil {
@@ -442,13 +436,10 @@ func TestHumanValidationServer_SubmitCorrection(t *testing.T) {
 			t.Fatalf("Expected response success to be false when orchestrator fails")
 		}
 
-		s.mu.RLock()
-		task := s.tasks[taskId]
-		s.mu.RUnlock()
+		task := getTask(s, taskId)
 
 		if task.Status != TaskStatusPending {
 			t.Fatalf("Expected status rolled back to %s, got %s", TaskStatusPending, task.Status)
 		}
 	})
 }
-

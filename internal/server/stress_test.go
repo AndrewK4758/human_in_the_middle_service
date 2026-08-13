@@ -1,13 +1,15 @@
 package server
 
-
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"google.golang.org/grpc"
 
 	pb "github.com/AndrewK4758/shared_protos"
 	"google.golang.org/protobuf/proto"
@@ -16,7 +18,7 @@ import (
 
 // TestStress_ConcurrentTaskCreation tests creation of 500 tasks concurrently to check for task ID collisions and race conditions.
 func TestStress_ConcurrentTaskCreation(t *testing.T) {
-	s := NewHumanValidationServer("localhost:11112")
+	s := NewHumanValidationServer(&mockJetStreamForServer{}, nil)
 	ctx := context.Background()
 
 	const numGoroutines = 100
@@ -62,7 +64,7 @@ func TestStress_ConcurrentTaskCreation(t *testing.T) {
 
 	wg.Wait()
 
-	t.Logf("Created: %d, Exists: %d, Map Size: %d", createdCount, existsCount, len(s.tasks))
+	t.Logf("Created: %d, Exists: %d, Map Size: %d", createdCount, existsCount, countTasks(s))
 	if createdCount != int64(numGoroutines*tasksPerGoroutine) {
 		t.Errorf("Expected %d created tasks, got %d", numGoroutines*tasksPerGoroutine, createdCount)
 	}
@@ -70,7 +72,7 @@ func TestStress_ConcurrentTaskCreation(t *testing.T) {
 
 // TestStress_ConcurrentReadWriteDelete tests concurrent Create, GetPendingTasks, and Delete operations.
 func TestStress_ConcurrentReadWriteDelete(t *testing.T) {
-	s := NewHumanValidationServer("localhost:11112")
+	s := NewHumanValidationServer(&mockJetStreamForServer{}, nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
@@ -87,20 +89,20 @@ func TestStress_ConcurrentReadWriteDelete(t *testing.T) {
 			count := 0
 			for {
 				select {
-					case <-ctx.Done():
-						return
-					default:
-						req := &pb.CreateTaskRequest{
-							Identity: &pb.InfrastructureIdentity{
-								TenantId: "tenant_rw",
-								AppId:    "app_rw",
-								JobId:    fmt.Sprintf("job_rw_%d_%d", id, count),
-							},
-							StepId: "step_rw",
-						}
-						_, _ = s.CreateValidationTask(ctx, req)
-						count++
-						time.Sleep(1 * time.Millisecond)
+				case <-ctx.Done():
+					return
+				default:
+					req := &pb.CreateTaskRequest{
+						Identity: &pb.InfrastructureIdentity{
+							TenantId: "tenant_rw",
+							AppId:    "app_rw",
+							JobId:    fmt.Sprintf("job_rw_%d_%d", id, count),
+						},
+						StepId: "step_rw",
+					}
+					_, _ = s.CreateValidationTask(ctx, req)
+					count++
+					time.Sleep(1 * time.Millisecond)
 				}
 			}
 		}(i)
@@ -134,13 +136,12 @@ func TestStress_ConcurrentReadWriteDelete(t *testing.T) {
 				case <-ctx.Done():
 					return
 				default:
-					s.mu.Lock()
 					var idToDelete string
-					for id := range s.tasks {
+					keys, _ := s.kv.Keys(context.Background())
+					for _, id := range keys {
 						idToDelete = id
 						break
 					}
-					s.mu.Unlock()
 
 					if idToDelete != "" {
 						_, _ = s.DeleteTask(ctx, &pb.DeleteTaskRequest{TaskId: idToDelete})
@@ -159,13 +160,14 @@ func TestStateMachine_ConcurrentSubmitCorrection(t *testing.T) {
 	mockOrch := &mockOrchestratorServer{}
 	addr, cleanup := startMockOrchestrator(t, mockOrch)
 	defer cleanup()
-
-	s := NewHumanValidationServer(addr)
+	conn, _ := grpc.Dial(addr, grpc.WithInsecure())
+	defer conn.Close()
+	s := NewHumanValidationServer(&mockJetStreamForServer{}, pb.NewOrchestratorServiceClient(conn))
 	ctx := context.Background()
 
 	// Setup slow orchestrator response
 	var orchCallCount int64
-	mockOrch.resumeJobFunc = func(ctx context.Context, req *pb.ResumeJobRequest) (*pb.ResumeJobResponse, error) {
+	mockOrch.resumeJobFunc = func(ctx context.Context, req *pb.ResumeJobRequest, opts ...grpc.CallOption) (*pb.ResumeJobResponse, error) {
 		atomic.AddInt64(&orchCallCount, 1)
 		time.Sleep(50 * time.Millisecond) // simulate work
 		return &pb.ResumeJobResponse{Success: true, Message: "resumed"}, nil
@@ -178,7 +180,7 @@ func TestStateMachine_ConcurrentSubmitCorrection(t *testing.T) {
 			AppId:    "app_state",
 			JobId:    "job_state_machine",
 		},
-		StepId:   "step_state",
+		StepId: "step_state",
 	})
 	if err != nil {
 		t.Fatalf("Failed to create task: %v", err)
@@ -200,7 +202,7 @@ func TestStateMachine_ConcurrentSubmitCorrection(t *testing.T) {
 		go func(idx int) {
 			defer wg.Done()
 			r, err := s.SubmitCorrection(ctx, &pb.SubmitCorrectionRequest{
-				TaskId:        taskId,
+				TaskId:    taskId,
 				Corrected: unmarshalStruct(`{"fixed": true}`),
 			})
 			results[idx] = result{resp: r, err: err}
@@ -216,7 +218,8 @@ func TestStateMachine_ConcurrentSubmitCorrection(t *testing.T) {
 
 	for _, r := range results {
 		if r.err != nil {
-			if r.err.Error() == fmt.Sprintf("task %s is already PROCESSING", taskId) {
+			errStr := r.err.Error()
+			if strings.Contains(errStr, "is already PROCESSING") || strings.Contains(errStr, "wrong sequence") {
 				errAlreadyProcessingCount++
 			} else {
 				t.Errorf("Unexpected error: %v", r.err)
@@ -236,9 +239,7 @@ func TestStateMachine_ConcurrentSubmitCorrection(t *testing.T) {
 		t.Errorf("Expected Orchestrator to be called exactly once, but called %d times!", orchCallCount)
 	}
 
-	s.mu.RLock()
-	finalStatus := s.tasks[taskId].Status
-	s.mu.RUnlock()
+	finalStatus := getTask(s, taskId).Status
 
 	if finalStatus != TaskStatusResolved {
 		t.Errorf("Expected final status RESOLVED, got %s", finalStatus)
@@ -250,8 +251,9 @@ func TestStateMachine_RollbackAndRetry(t *testing.T) {
 	mockOrch := &mockOrchestratorServer{}
 	addr, cleanup := startMockOrchestrator(t, mockOrch)
 	defer cleanup()
-
-	s := NewHumanValidationServer(addr)
+	conn, _ := grpc.Dial(addr, grpc.WithInsecure())
+	defer conn.Close()
+	s := NewHumanValidationServer(&mockJetStreamForServer{}, pb.NewOrchestratorServiceClient(conn))
 	ctx := context.Background()
 
 	createResp, err := s.CreateValidationTask(ctx, &pb.CreateTaskRequest{
@@ -260,7 +262,7 @@ func TestStateMachine_RollbackAndRetry(t *testing.T) {
 			AppId:    "app_rr",
 			JobId:    "job_rollback_retry",
 		},
-		StepId:   "step_rr",
+		StepId: "step_rr",
 	})
 	if err != nil {
 		t.Fatalf("Failed to create task: %v", err)
@@ -268,12 +270,12 @@ func TestStateMachine_RollbackAndRetry(t *testing.T) {
 	taskId := createResp.GetTaskId()
 
 	// Phase 1: Fail Orchestrator call
-	mockOrch.resumeJobFunc = func(ctx context.Context, req *pb.ResumeJobRequest) (*pb.ResumeJobResponse, error) {
+	mockOrch.resumeJobFunc = func(ctx context.Context, req *pb.ResumeJobRequest, opts ...grpc.CallOption) (*pb.ResumeJobResponse, error) {
 		return nil, fmt.Errorf("temporary network error")
 	}
 
 	_, err = s.SubmitCorrection(ctx, &pb.SubmitCorrectionRequest{
-		TaskId:        taskId,
+		TaskId:    taskId,
 		Corrected: unmarshalStruct(`{"fixed": false}`),
 	})
 	if err == nil {
@@ -281,21 +283,19 @@ func TestStateMachine_RollbackAndRetry(t *testing.T) {
 	}
 
 	// Verify rollback to PENDING
-	s.mu.RLock()
-	statusAfterFail := s.tasks[taskId].Status
-	s.mu.RUnlock()
+	statusAfterFail := getTask(s, taskId).Status
 
 	if statusAfterFail != TaskStatusPending {
 		t.Fatalf("Expected status to roll back to PENDING, got %s", statusAfterFail)
 	}
 
 	// Phase 2: Fix Orchestrator and retry
-	mockOrch.resumeJobFunc = func(ctx context.Context, req *pb.ResumeJobRequest) (*pb.ResumeJobResponse, error) {
+	mockOrch.resumeJobFunc = func(ctx context.Context, req *pb.ResumeJobRequest, opts ...grpc.CallOption) (*pb.ResumeJobResponse, error) {
 		return &pb.ResumeJobResponse{Success: true, Message: "resumed after retry"}, nil
 	}
 
 	resp, err := s.SubmitCorrection(ctx, &pb.SubmitCorrectionRequest{
-		TaskId:        taskId,
+		TaskId:    taskId,
 		Corrected: unmarshalStruct(`{"fixed": true}`),
 	})
 	if err != nil {
@@ -306,9 +306,7 @@ func TestStateMachine_RollbackAndRetry(t *testing.T) {
 	}
 
 	// Verify final status RESOLVED
-	s.mu.RLock()
-	statusAfterSuccess := s.tasks[taskId].Status
-	s.mu.RUnlock()
+	statusAfterSuccess := getTask(s, taskId).Status
 
 	if statusAfterSuccess != TaskStatusResolved {
 		t.Fatalf("Expected final status RESOLVED, got %s", statusAfterSuccess)
@@ -317,7 +315,7 @@ func TestStateMachine_RollbackAndRetry(t *testing.T) {
 
 // TestNatsServer_ConcurrentProcessing tests NATS worker handling concurrent JetStream messages.
 func TestNatsServer_ConcurrentProcessing(t *testing.T) {
-	valServer := NewHumanValidationServer("localhost:11112")
+	valServer := NewHumanValidationServer(&mockJetStreamForServer{}, nil)
 	mockJS := newMockJetStream()
 	natsServer := &NatsServer{
 		nc:               nil,
@@ -336,11 +334,11 @@ func TestNatsServer_ConcurrentProcessing(t *testing.T) {
 			defer wg.Done()
 			payloadStruct, _ := structpb.NewStruct(map[string]interface{}{
 				"node_config": map[string]interface{}{
-					"node_name":       "NatsStep",
+					"node_name": "NatsStep",
 				},
 				"global_state": map[string]interface{}{
 					"functional": map[string]interface{}{
-						"step_id":         fmt.Sprintf("step_nats_%d", idx),
+						"step_id": fmt.Sprintf("step_nats_%d", idx),
 					},
 				},
 			})
@@ -368,9 +366,7 @@ func TestNatsServer_ConcurrentProcessing(t *testing.T) {
 
 	wg.Wait()
 
-	valServer.mu.RLock()
-	taskCount := len(valServer.tasks)
-	valServer.mu.RUnlock()
+	taskCount := countTasks(valServer)
 
 	if taskCount != numMsgs {
 		t.Errorf("Expected %d pending tasks created via NATS, got %d", numMsgs, taskCount)

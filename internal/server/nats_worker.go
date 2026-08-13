@@ -1,6 +1,5 @@
 package server
 
-
 import (
 	"context"
 	"fmt"
@@ -35,7 +34,7 @@ type NatsServer struct {
 	responsesStream  string
 }
 
-func NewNatsServer(nc *nats.Conn, js jetstream.JetStream, validationServer *HumanValidationServer) *NatsServer {
+func NewNatsServer(nc *nats.Conn, js jetstream.JetStream, validationServer TaskCreator) *NatsServer {
 	filterSubjectsStr := envutil.GetStringOrDefault("WORKERS_FILTER_SUBJECTS", "worker.human.validation,worker.human.validation.>")
 	return &NatsServer{
 		nc:               nc,
@@ -57,8 +56,14 @@ func (s *NatsServer) Start(ctx context.Context) error {
 			Durable:        s.consumerName,
 			AckPolicy:      jetstream.AckExplicitPolicy,
 			FilterSubjects: s.filterSubjects,
-			MaxAckPending:  10,
+			MaxAckPending:  envutil.GetIntOrDefault("MAX_ACK_PENDING", 10),
 			AckWait:        1 * time.Minute,
+			BackOff: []time.Duration{
+				5 * time.Second,
+				30 * time.Second,
+				1 * time.Minute,
+				5 * time.Minute,
+			},
 		})
 		if err == nil {
 			break
@@ -71,8 +76,10 @@ func (s *NatsServer) Start(ctx context.Context) error {
 	}
 
 	logger.Info("HumanValidation", "Starting Human Validation NATS consumer...")
+	workerPoolSize := envutil.GetIntOrDefault("WORKER_POOL_SIZE", 10)
+	sem := make(chan struct{}, workerPoolSize)
 	cc, err := cons.Consume(func(msg jetstream.Msg) {
-		s.processMessage(ctx, msg)
+		go s.HandleMessageWithRecovery(ctx, msg, sem)
 	})
 	if err != nil {
 		return fmt.Errorf("failed to start consuming: %w", err)
@@ -81,6 +88,25 @@ func (s *NatsServer) Start(ctx context.Context) error {
 	<-ctx.Done()
 	cc.Stop()
 	return nil
+}
+
+func (s *NatsServer) HandleMessageWithRecovery(ctx context.Context, msg jetstream.Msg, sem chan struct{}) {
+	sem <- struct{}{}
+	defer func() {
+		<-sem
+		if r := recover(); r != nil {
+			var t, a, j = "unknown", "unknown", "unknown"
+			var req pb.ExecuteTaskRequest
+			if err := proto.Unmarshal(msg.Data(), &req); err == nil && req.Identity != nil {
+				t = req.Identity.TenantId
+				a = req.Identity.AppId
+				j = req.Identity.JobId
+			}
+			logger.Error("HumanValidation", "Panic recovered in NATS consumer goroutine for TenantID: %s, AppID: %s, JobID: %s. Error: %v", t, a, j, r)
+			msg.NakWithDelay(5 * time.Second)
+		}
+	}()
+	s.processMessage(ctx, msg)
 }
 
 func (s *NatsServer) processMessage(ctx context.Context, msg jetstream.Msg) {
@@ -131,7 +157,7 @@ func (s *NatsServer) processMessage(ctx context.Context, msg jetstream.Msg) {
 	var expectedSchema *structpb.Struct
 	if executeTaskPayload.NodeConfig != nil {
 		systemInstructions = executeTaskPayload.NodeConfig.SystemInstructions
-		
+
 		if executeTaskPayload.NodeConfig.ExpectedSchemaStruct != nil {
 			expectedSchema = executeTaskPayload.NodeConfig.ExpectedSchemaStruct
 		}

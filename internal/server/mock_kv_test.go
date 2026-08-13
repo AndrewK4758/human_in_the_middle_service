@@ -4,108 +4,151 @@ import (
 	"context"
 	"fmt"
 	"sync"
-	"time"
 
+	pb "github.com/AndrewK4758/shared_protos"
 	"github.com/nats-io/nats.go/jetstream"
+	"google.golang.org/grpc"
+	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/structpb"
 )
 
-type mockKeyValue struct {
-	jetstream.KeyValue
-	mu   sync.RWMutex
-	data map[string]mockKVEntry
-}
-
-type mockKVEntry struct {
+type mockRecord struct {
 	val []byte
 	rev uint64
 }
 
+type mockKeyValue struct {
+	jetstream.KeyValue
+	mu    sync.RWMutex
+	store map[string]mockRecord
+}
+
 func newMockKeyValue() *mockKeyValue {
-	return &mockKeyValue{
-		data: make(map[string]mockKVEntry),
-	}
+	return &mockKeyValue{store: make(map[string]mockRecord)}
 }
 
 func (m *mockKeyValue) Put(ctx context.Context, key string, value []byte) (uint64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	entry := m.data[key]
-	entry.val = value
-	entry.rev++
-	m.data[key] = entry
-	return entry.rev, nil
+	m.store[key] = mockRecord{val: value, rev: 1}
+	return 1, nil
 }
 
 func (m *mockKeyValue) Get(ctx context.Context, key string) (jetstream.KeyValueEntry, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	entry, ok := m.data[key]
+	rec, ok := m.store[key]
 	if !ok {
 		return nil, jetstream.ErrKeyNotFound
 	}
-	return &mockKVEntryImpl{key: key, val: entry.val, rev: entry.rev}, nil
-}
-
-func (m *mockKeyValue) Update(ctx context.Context, key string, value []byte, revision uint64) (uint64, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	entry, ok := m.data[key]
-	if ok && entry.rev != revision {
-		return 0, fmt.Errorf("wrong revision")
-	}
-	entry.val = value
-	entry.rev++
-	m.data[key] = entry
-	return entry.rev, nil
+	return &mockKeyValueEntry{val: rec.val, rev: rec.rev}, nil
 }
 
 func (m *mockKeyValue) Delete(ctx context.Context, key string, opts ...jetstream.KVDeleteOpt) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if _, ok := m.data[key]; !ok {
+	if _, ok := m.store[key]; !ok {
 		return jetstream.ErrKeyNotFound
 	}
-	delete(m.data, key)
+	delete(m.store, key)
 	return nil
+}
+
+func (m *mockKeyValue) Update(ctx context.Context, key string, value []byte, revision uint64) (uint64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	rec, ok := m.store[key]
+	if ok && rec.rev != revision {
+		return 0, fmt.Errorf("wrong sequence")
+	}
+	m.store[key] = mockRecord{val: value, rev: revision + 1}
+	return revision + 1, nil
 }
 
 func (m *mockKeyValue) Keys(ctx context.Context, opts ...jetstream.WatchOpt) ([]string, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	var keys []string
-	for k := range m.data {
-		keys = append(keys, k)
-	}
-	if len(keys) == 0 {
+	if len(m.store) == 0 {
 		return nil, jetstream.ErrNoKeysFound
+	}
+	keys := make([]string, 0, len(m.store))
+	for k := range m.store {
+		keys = append(keys, k)
 	}
 	return keys, nil
 }
 
-type mockKVEntryImpl struct {
-	key string
+type mockKeyValueEntry struct {
+	jetstream.KeyValueEntry
 	val []byte
 	rev uint64
 }
 
-func (e *mockKVEntryImpl) Bucket() string       { return "MOCK" }
-func (e *mockKVEntryImpl) Key() string          { return e.key }
-func (e *mockKVEntryImpl) Value() []byte        { return e.val }
-func (e *mockKVEntryImpl) Revision() uint64     { return e.rev }
-func (e *mockKVEntryImpl) Created() time.Time   { return time.Now() }
-func (e *mockKVEntryImpl) Delta() uint64        { return 0 }
-func (e *mockKVEntryImpl) Operation() jetstream.KeyValueOp { return jetstream.KeyValuePut }
-
-func (m *mockJetStream) CreateOrUpdateKeyValue(ctx context.Context, cfg jetstream.KeyValueConfig) (jetstream.KeyValue, error) {
-	return newMockKeyValue(), nil
+func (e *mockKeyValueEntry) Value() []byte {
+	return e.val
 }
 
-func (m *mockJetStream) CreateKeyValue(ctx context.Context, cfg jetstream.KeyValueConfig) (jetstream.KeyValue, error) {
-	return newMockKeyValue(), nil
+func (e *mockKeyValueEntry) Revision() uint64 {
+	return e.rev
 }
 
-func (m *mockJetStream) KeyValue(ctx context.Context, bucket string) (jetstream.KeyValue, error) {
-	return newMockKeyValue(), nil
+type mockJetStreamForServer struct {
+	jetstream.JetStream
+	kv *mockKeyValue
 }
 
-func (m *mockJetStream) DeleteKeyValue(ctx context.Context, bucket string) error { return nil }
+func (m *mockJetStreamForServer) CreateOrUpdateKeyValue(ctx context.Context, cfg jetstream.KeyValueConfig) (jetstream.KeyValue, error) {
+	if m.kv == nil {
+		m.kv = newMockKeyValue()
+	}
+	return m.kv, nil
+}
+
+func countTasks(s *HumanValidationServer) int {
+	keys, err := s.kv.Keys(context.Background())
+	if err != nil {
+		return 0
+	}
+	return len(keys)
+}
+
+func setTaskStatus(s *HumanValidationServer, taskId string, status string) {
+	entry, err := s.kv.Get(context.Background(), taskId)
+	if err != nil {
+		return
+	}
+	var task pb.PendingTask
+	proto.Unmarshal(entry.Value(), &task)
+	task.Status = status
+	taskBytes, _ := proto.Marshal(&task)
+	s.kv.Put(context.Background(), taskId, taskBytes)
+}
+
+func getTask(s *HumanValidationServer, taskId string) *pb.PendingTask {
+	entry, err := s.kv.Get(context.Background(), taskId)
+	if err != nil {
+		return nil
+	}
+	var task pb.PendingTask
+	proto.Unmarshal(entry.Value(), &task)
+	return &task
+}
+
+func unmarshalStruct(jsonStr string) *structpb.Struct {
+	var s structpb.Struct
+	protojson.Unmarshal([]byte(jsonStr), &s)
+	return &s
+}
+
+type mockOrchClient struct {
+	pb.OrchestratorServiceClient
+	resumeJobFunc func(ctx context.Context, in *pb.ResumeJobRequest, opts ...grpc.CallOption) (*pb.ResumeJobResponse, error)
+}
+
+func (m *mockOrchClient) ResumeJob(ctx context.Context, in *pb.ResumeJobRequest, opts ...grpc.CallOption) (*pb.ResumeJobResponse, error) {
+	if m.resumeJobFunc != nil {
+		return m.resumeJobFunc(ctx, in, opts...)
+	}
+	return &pb.ResumeJobResponse{Success: true, Message: "Job resumed"}, nil
+}
