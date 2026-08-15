@@ -3,3 +3,8 @@
 .vscode/
 bin/
 bin
+obj/
+obj
+cmake-build-*/
+out/
+.vs/
