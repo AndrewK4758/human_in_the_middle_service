@@ -9,6 +9,8 @@ cd human_validation_service
 go run cmd/server/main.go
 ```
 
+> **Note**: To cleanly build and run all ecosystem microservices simultaneously with correct relative paths and multiplexed logs, execute `./scripts/run_all.zsh` from the project root instead.
+
 The service runs on port `:11114` by default.
 
 ## Docker Deployment
