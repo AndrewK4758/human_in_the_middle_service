@@ -130,7 +130,7 @@ func (s *NatsServer) processMessage(ctx context.Context, msg jetstream.Msg) {
 
 	identityparser.NewIdentityParser(req.GetIdentity()).MustValidate(true, "HumanValidation_NatsWorker")
 
-	if req.GetTaskSubject() == pb.WorkerSubject_WORKER_SUBJECT_UNSPECIFIED {
+	if req.GetTaskSubject() == "" {
 		err := fmt.Errorf("action failed for job HumanValidation_NatsWorker: missing required TaskSubject")
 		s.nackMessage(msg, streamName, t, a, j, attempt, startTime, err)
 		return
