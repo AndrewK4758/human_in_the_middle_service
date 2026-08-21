@@ -5,8 +5,13 @@ The Human Validation Service acts as the human-in-the-loop validation manager fo
 ## Features
 
 - **Decoupled Workflow Processing**: Prevents thread-starvation or queue timeout issues by pausing jobs asynchronously.
+- **Hierarchical Deterministic Keying**: Uses `$tenant_id.$app_id.$job_id.$step_id` for $O(1)$ idempotent lookups in JetStream KV.
+- **Pessimistic Concurrency Leasing**: Provides `ClaimTask` and `ReleaseTask` RPCs to prevent multiple operators from validating the same suspended task simultaneously. Includes an automated background `LeaseReaper` to auto-recover stale leases.
 - **gRPC RPC API**:
-  - `CreateValidationTask`: Registers a job needing human intervention.
-  - `GetPendingTasks`: Returns tasks matching a status (e.g., `PENDING`).
+  - `CreateValidationTask`: Registers a job needing human intervention ($O(1)$ idempotent).
+  - `GetPendingTasks`: Returns/streams tasks matching a status (e.g., `PENDING`, `PROCESSING`) and optional tenant identity filter.
+  - `ClaimTask`: Claims a task with a configurable lease duration (`lease_seconds`).
+  - `ReleaseTask`: Releases an in-progress claimed task back to `PENDING` status.
   - `SubmitCorrection`: Resolves the task and triggers job resumption via the Orchestrator's `ResumeJob` endpoint.
-- **Complete Traceability**: Emits telemetry event tracking and matches system standards.
+  - `DeleteTask`: Removes a validation task from the KV bucket.
+- **Complete Traceability**: Emits structured telemetry events to `trace.validation.{tenant_id}.{app_id}` (`validation.task_suspended`, `validation.task_claimed`, `validation.task_released`, `validation.task_resumed`, `validation.task_deleted`).

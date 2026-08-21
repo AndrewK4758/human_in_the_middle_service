@@ -46,7 +46,7 @@ func main() {
 	defer conn.Close()
 	orchClient := pb.NewOrchestratorServiceClient(conn)
 
-	validationServer := server.NewHumanValidationServer(js, orchClient)
+	validationServer := server.NewHumanValidationServerWithPublisher(js, orchClient, server.NewNatsEventPublisher(nc))
 	natsServer := server.NewNatsServer(nc, js, validationServer)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

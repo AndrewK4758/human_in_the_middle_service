@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"net"
 	"sync"
 
 	pb "github.com/AndrewK4758/shared_protos"
@@ -152,3 +153,70 @@ func (m *mockOrchClient) ResumeJob(ctx context.Context, in *pb.ResumeJobRequest,
 	}
 	return &pb.ResumeJobResponse{Success: true, Message: "Job resumed"}, nil
 }
+
+type mockEventPublisher struct {
+	mu       sync.Mutex
+	events   map[string][][]byte
+	subjects []string
+}
+
+func newMockEventPublisher() *mockEventPublisher {
+	return &mockEventPublisher{
+		events: make(map[string][][]byte),
+	}
+}
+
+func (p *mockEventPublisher) Publish(subject string, data []byte) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.subjects = append(p.subjects, subject)
+	p.events[subject] = append(p.events[subject], data)
+	return nil
+}
+
+func (p *mockEventPublisher) GetEvents(subject string) [][]byte {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.events[subject]
+}
+
+func (p *mockEventPublisher) GetAllSubjects() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.subjects
+}
+
+type mockOrchestratorServer struct {
+	pb.UnimplementedOrchestratorServiceServer
+	resumeJobFunc func(ctx context.Context, req *pb.ResumeJobRequest, opts ...grpc.CallOption) (*pb.ResumeJobResponse, error)
+}
+
+func (m *mockOrchestratorServer) ResumeJob(ctx context.Context, req *pb.ResumeJobRequest) (*pb.ResumeJobResponse, error) {
+	if m.resumeJobFunc != nil {
+		return m.resumeJobFunc(ctx, req)
+	}
+	return &pb.ResumeJobResponse{Success: true, Message: "resumed successfully"}, nil
+}
+
+func startMockOrchestrator(t interface{ Fatalf(string, ...interface{}) }, mock *mockOrchestratorServer) (string, func()) {
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Failed to listen for mock orchestrator: %v", err)
+	}
+
+	grpcServer := grpc.NewServer()
+	pb.RegisterOrchestratorServiceServer(grpcServer, mock)
+
+	go func() {
+		_ = grpcServer.Serve(lis)
+	}()
+
+	cleanup := func() {
+		grpcServer.Stop()
+		lis.Close()
+	}
+
+	return lis.Addr().String(), cleanup
+}
+
+
