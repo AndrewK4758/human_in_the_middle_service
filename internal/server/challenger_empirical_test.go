@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 
 	pb "github.com/AndrewK4758/shared_protos"
 	"github.com/nats-io/nats.go"
@@ -31,7 +32,7 @@ func TestChallenger_SubmitCorrection_EdgeCases(t *testing.T) {
 	mockOrch := &mockOrchestratorServer{}
 	addr, cleanup := startMockOrchestrator(t, mockOrch)
 	defer cleanup()
-	conn, _ := grpc.Dial(addr, grpc.WithInsecure())
+	conn, _ := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	defer conn.Close()
 	s := NewHumanValidationServer(&mockJetStreamForServer{}, pb.NewOrchestratorServiceClient(conn))
 	ctx := context.Background()
@@ -257,7 +258,7 @@ func TestChallenger_OrchestratorDisconnectAndRollback(t *testing.T) {
 	mockOrch := &mockOrchestratorServer{}
 	addr, cleanup := startMockOrchestrator(t, mockOrch)
 	defer cleanup()
-	conn, _ := grpc.Dial(addr, grpc.WithInsecure())
+	conn, _ := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	defer conn.Close()
 	s := NewHumanValidationServer(&mockJetStreamForServer{}, pb.NewOrchestratorServiceClient(conn))
 	ctx := context.Background()
@@ -298,7 +299,7 @@ func TestChallenger_OrchestratorDisconnectAndRollback(t *testing.T) {
 	mockOrch2 := &mockOrchestratorServer{}
 	newAddr, cleanup2 := startMockOrchestrator(t, mockOrch2)
 	defer cleanup2()
-	conn2, _ := grpc.Dial(newAddr, grpc.WithInsecure())
+	conn2, _ := grpc.NewClient(newAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	defer conn2.Close()
 	s.orchClient = pb.NewOrchestratorServiceClient(conn2)
 	resp, err := s.SubmitCorrection(ctx, &pb.SubmitCorrectionRequest{

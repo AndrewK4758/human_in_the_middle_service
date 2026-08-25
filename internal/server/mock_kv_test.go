@@ -198,7 +198,7 @@ func (m *mockOrchestratorServer) ResumeJob(ctx context.Context, req *pb.ResumeJo
 	return &pb.ResumeJobResponse{Success: true, Message: "resumed successfully"}, nil
 }
 
-func startMockOrchestrator(t interface{ Fatalf(string, ...interface{}) }, mock *mockOrchestratorServer) (string, func()) {
+func startMockOrchestrator(t interface{ Fatalf(string, ...any) }, mock *mockOrchestratorServer) (string, func()) {
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("Failed to listen for mock orchestrator: %v", err)
@@ -218,5 +218,3 @@ func startMockOrchestrator(t interface{ Fatalf(string, ...interface{}) }, mock *
 
 	return lis.Addr().String(), cleanup
 }
-
-

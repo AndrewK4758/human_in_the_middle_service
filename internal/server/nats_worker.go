@@ -35,7 +35,7 @@ type NatsServer struct {
 }
 
 func NewNatsServer(nc *nats.Conn, js jetstream.JetStream, validationServer TaskCreator) *NatsServer {
-	filterSubjectsStr := envutil.GetStringOrDefault("WORKERS_FILTER_SUBJECTS", "worker.human.validation,worker.human.validation.>")
+	filterSubjectsStr := envutil.GetStringOrDefault("WORKERS_FILTER_SUBJECTS", "worker.human.>")
 	return &NatsServer{
 		nc:               nc,
 		js:               js,
@@ -51,7 +51,7 @@ func (s *NatsServer) Start(ctx context.Context) error {
 
 	var cons jetstream.Consumer
 	var err error
-	for i := 0; i < 90; i++ {
+	for range 90 {
 		cons, err = s.js.CreateOrUpdateConsumer(ctx, streamName, jetstream.ConsumerConfig{
 			Durable:        s.consumerName,
 			AckPolicy:      jetstream.AckExplicitPolicy,
@@ -218,6 +218,7 @@ func (s *NatsServer) processMessage(ctx context.Context, msg jetstream.Msg) {
 		StepId:             stepId,
 		Metadata:           metadata,
 		ErrorMessage:       fmt.Sprintf("Human validation required for step '%s' (ID: %s)", stepName, stepId),
+		CallbackAddress:    req.GetCallbackAddress(),
 	}
 
 	if s.validationServer != nil {

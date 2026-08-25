@@ -1,26 +1,27 @@
 package server
 
 import (
-	"context"
-	"encoding/json"
-	"fmt"
-	"strings"
-	"sync"
-	"time"
+    "context"
+    "encoding/json"
+    "errors"
+    "fmt"
+    "strings"
+    "sync"
+    "time"
 
-	"github.com/google/uuid"
+    "github.com/google/uuid"
 
-	pb "github.com/AndrewK4758/shared_protos"
-	"github.com/AndrewK4758/shared_utils/envutil"
-	"github.com/AndrewK4758/shared_utils/identityparser"
-	"github.com/AndrewK4758/shared_utils/logger"
-	"github.com/nats-io/nats.go"
-	"github.com/nats-io/nats.go/jetstream"
+    pb "github.com/AndrewK4758/shared_protos"
+    "github.com/AndrewK4758/shared_utils/envutil"
+    "github.com/AndrewK4758/shared_utils/identityparser"
+    "github.com/AndrewK4758/shared_utils/logger"
+    "github.com/nats-io/nats.go"
+    "github.com/nats-io/nats.go/jetstream"
 
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
-	"google.golang.org/protobuf/encoding/protojson"
-	"google.golang.org/protobuf/proto"
+    "google.golang.org/grpc/codes"
+    "google.golang.org/grpc/status"
+    "google.golang.org/protobuf/encoding/protojson"
+    "google.golang.org/protobuf/proto"
 )
 
 const (
@@ -276,6 +277,7 @@ func (s *HumanValidationServer) CreateValidationTask(ctx context.Context, req *p
 		StepContextInput:   req.GetStepContextInput(),
 		Metadata:           req.GetMetadata(),
 		ExpectedSchema:     req.GetExpectedSchema(),
+		CallbackAddress:    req.GetCallbackAddress(),
 	}
 
 	taskBytes, err := proto.Marshal(task)
@@ -326,7 +328,7 @@ func (s *HumanValidationServer) GetPendingTasks(req *pb.GetPendingTasksRequest, 
 
 	keys, err := s.kv.Keys(stream.Context())
 	if err != nil {
-		if err == jetstream.ErrNoKeysFound {
+		if errors.Is(err, jetstream.ErrNoKeysFound) {
 			return nil
 		}
 		return status.Errorf(codes.Internal, "failed to read tasks: %v", err)
@@ -365,6 +367,23 @@ func (s *HumanValidationServer) GetPendingTasks(req *pb.GetPendingTasksRequest, 
 	return nil
 }
 
+func (s *HumanValidationServer) getTaskEntry(ctx context.Context, taskID string) (jetstream.KeyValueEntry, *pb.PendingTask, error) {
+	entry, err := s.kv.Get(ctx, taskID)
+	if err != nil {
+		if errors.Is(err, jetstream.ErrKeyNotFound) {
+			return nil, nil, status.Errorf(codes.NotFound, "task %s not found", taskID)
+		}
+		return nil, nil, status.Errorf(codes.Internal, "failed to read task: %v", err)
+	}
+
+	var task pb.PendingTask
+	if err := proto.Unmarshal(entry.Value(), &task); err != nil {
+		return nil, nil, status.Errorf(codes.Internal, "failed to parse task: %v", err)
+	}
+
+	return entry, &task, nil
+}
+
 func (s *HumanValidationServer) ClaimTask(ctx context.Context, req *pb.ClaimTaskRequest) (*pb.ClaimTaskResponse, error) {
 	taskID := req.GetTaskId()
 	if taskID == "" {
@@ -383,17 +402,9 @@ func (s *HumanValidationServer) ClaimTask(ctx context.Context, req *pb.ClaimTask
 		identityparser.NewIdentityParser(req.GetIdentity()).MustValidate(true, "ClaimTask")
 	}
 
-	entry, err := s.kv.Get(ctx, taskID)
+	entry, task, err := s.getTaskEntry(ctx, taskID)
 	if err != nil {
-		if err == jetstream.ErrKeyNotFound {
-			return nil, status.Errorf(codes.NotFound, "task %s not found", taskID)
-		}
-		return nil, status.Errorf(codes.Internal, "failed to read task: %v", err)
-	}
-
-	var task pb.PendingTask
-	if err := proto.Unmarshal(entry.Value(), &task); err != nil {
-		return nil, status.Errorf(codes.Internal, "failed to parse task: %v", err)
+		return nil, err
 	}
 
 	nowUnix := time.Now().UTC().Unix()
@@ -425,7 +436,7 @@ func (s *HumanValidationServer) ClaimTask(ctx context.Context, req *pb.ClaimTask
 	task.ClaimedBy = operatorID
 	task.LeaseExpiresAt = leaseExpiresAt
 
-	taskBytes, err := proto.Marshal(&task)
+	taskBytes, err := proto.Marshal(task)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to marshal task: %v", err)
 	}
@@ -476,17 +487,9 @@ func (s *HumanValidationServer) ReleaseTask(ctx context.Context, req *pb.Release
 		identityparser.NewIdentityParser(req.GetIdentity()).MustValidate(true, "ReleaseTask")
 	}
 
-	entry, err := s.kv.Get(ctx, taskID)
+	entry, task, err := s.getTaskEntry(ctx, taskID)
 	if err != nil {
-		if err == jetstream.ErrKeyNotFound {
-			return nil, status.Errorf(codes.NotFound, "task %s not found", taskID)
-		}
-		return nil, status.Errorf(codes.Internal, "failed to read task: %v", err)
-	}
-
-	var task pb.PendingTask
-	if err := proto.Unmarshal(entry.Value(), &task); err != nil {
-		return nil, status.Errorf(codes.Internal, "failed to parse task: %v", err)
+		return nil, err
 	}
 
 	if task.GetStatus() == TaskStatusResolved {
@@ -501,7 +504,7 @@ func (s *HumanValidationServer) ReleaseTask(ctx context.Context, req *pb.Release
 	task.ClaimedBy = ""
 	task.LeaseExpiresAt = 0
 
-	taskBytes, err := proto.Marshal(&task)
+	taskBytes, err := proto.Marshal(task)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to marshal task: %v", err)
 	}
@@ -547,17 +550,9 @@ func (s *HumanValidationServer) SubmitCorrection(ctx context.Context, req *pb.Su
 		identityparser.NewIdentityParser(req.GetIdentity()).MustValidate(true, "SubmitCorrection")
 	}
 
-	entry, err := s.kv.Get(ctx, req.GetTaskId())
+	entry, task, err := s.getTaskEntry(ctx, req.GetTaskId())
 	if err != nil {
-		if err == jetstream.ErrKeyNotFound {
-			return nil, status.Errorf(codes.NotFound, "task %s not found", req.GetTaskId())
-		}
-		return nil, status.Errorf(codes.Internal, "failed to read task: %v", err)
-	}
-
-	var task pb.PendingTask
-	if err := proto.Unmarshal(entry.Value(), &task); err != nil {
-		return nil, status.Errorf(codes.Internal, "failed to parse task: %v", err)
+		return nil, err
 	}
 
 	if task.GetStatus() == TaskStatusResolved {
@@ -578,7 +573,7 @@ func (s *HumanValidationServer) SubmitCorrection(ctx context.Context, req *pb.Su
 	// Atomically transition from PENDING to PROCESSING
 	if task.GetStatus() == TaskStatusPending {
 		task.Status = TaskStatusProcessing
-		taskBytes, err := proto.Marshal(&task)
+		taskBytes, err := proto.Marshal(task)
 		if err != nil {
 			return nil, status.Errorf(codes.Internal, "failed to marshal task: %v", err)
 		}
@@ -592,15 +587,16 @@ func (s *HumanValidationServer) SubmitCorrection(ctx context.Context, req *pb.Su
 	logger.Info("HumanValidation", "INFO: Human submitted correction for task %s, resuming job %s", req.GetTaskId(), jobID)
 
 	resumeReq := &pb.ResumeJobRequest{
-		Identity:  task.GetIdentity(),
-		Corrected: req.GetCorrected(),
-		StepId:    task.GetStepId(),
+		Identity:        task.GetIdentity(),
+		Corrected:       req.GetCorrected(),
+		StepId:          task.GetStepId(),
+		CallbackAddress: task.GetCallbackAddress(),
 	}
 
 	logger.Info("HumanValidation", "INFO: Sending ResumeJob request to orchestrator for Job: %s", jobID)
 	if s.orchClient == nil {
 		// If no orchestrator client configured, treat as local resolution
-		return s.finalizeTaskResolution(ctx, req.GetTaskId(), entry, &task)
+		return s.finalizeTaskResolution(ctx, req.GetTaskId(), entry, task)
 	}
 
 	resp, err := s.orchClient.ResumeJob(ctx, resumeReq)
@@ -617,7 +613,7 @@ func (s *HumanValidationServer) SubmitCorrection(ctx context.Context, req *pb.Su
 		}, nil
 	}
 
-	return s.finalizeTaskResolution(ctx, req.GetTaskId(), entry, &task)
+	return s.finalizeTaskResolution(ctx, req.GetTaskId(), entry, task)
 }
 
 func (s *HumanValidationServer) finalizeTaskResolution(ctx context.Context, taskID string, entry jetstream.KeyValueEntry, task *pb.PendingTask) (*pb.SubmitCorrectionResponse, error) {
@@ -683,7 +679,7 @@ func (s *HumanValidationServer) DeleteTask(ctx context.Context, req *pb.DeleteTa
 
 	err = s.kv.Delete(ctx, taskID)
 	if err != nil {
-		if err == jetstream.ErrKeyNotFound {
+		if errors.Is(err, jetstream.ErrKeyNotFound) {
 			return nil, status.Errorf(codes.NotFound, "task %s not found", taskID)
 		}
 		return nil, status.Errorf(codes.Internal, "failed to delete task %s: %v", taskID, err)

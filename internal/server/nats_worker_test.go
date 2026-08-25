@@ -96,25 +96,25 @@ func TestNatsServer_ProcessMessage_SuccessAndTaskCreation(t *testing.T) {
 		validationServer: valServer,
 	}
 
-	var expectedSchemaMap map[string]interface{}
+	var expectedSchemaMap map[string]any
 	_ = json.Unmarshal([]byte(`{"type":"object"}`), &expectedSchemaMap)
 
-	payloadMap := map[string]interface{}{
-		"node_config": map[string]interface{}{
+	payloadMap := map[string]any{
+		"node_config": map[string]any{
 			"node_name":              "ClassificationNode",
 			"expected_schema_struct": expectedSchemaMap,
 			"system_instructions":    "Classify incoming document",
 		},
-		"human_validation": map[string]interface{}{
+		"human_validation": map[string]any{
 			"required":        true,
 			"bypass_fallback": false,
 		},
-		"global_state": map[string]interface{}{
-			"functional": map[string]interface{}{
+		"global_state": map[string]any{
+			"functional": map[string]any{
 				"step_id": "step_classify_1",
 			},
 		},
-		"metadata": map[string]interface{}{
+		"metadata": map[string]any{
 			"env": "testing",
 		},
 	}
@@ -194,12 +194,12 @@ func TestNatsServer_ProcessMessage_PerformActionResponseWithErrorContract(t *tes
 		validationServer: valServer,
 	}
 
-	payloadStruct, err := structpb.NewStruct(map[string]interface{}{
-		"node_config": map[string]interface{}{
+	payloadStruct, err := structpb.NewStruct(map[string]any{
+		"node_config": map[string]any{
 			"node_name": "HumanValidationStep",
 		},
-		"global_state": map[string]interface{}{
-			"functional": map[string]interface{}{
+		"global_state": map[string]any{
+			"functional": map[string]any{
 				"step_id": "step_val_2",
 			},
 		},
@@ -324,12 +324,12 @@ func TestNatsServer_ProcessMessage_GraphIdAndInitialNodeIdExtraction(t *testing.
 		validationServer: valServer,
 	}
 
-	payloadStruct, err := structpb.NewStruct(map[string]interface{}{
-		"node_config": map[string]interface{}{
+	payloadStruct, err := structpb.NewStruct(map[string]any{
+		"node_config": map[string]any{
 			"node_name": "ExtractionNode",
 		},
-		"global_state": map[string]interface{}{
-			"functional": map[string]interface{}{
+		"global_state": map[string]any{
+			"functional": map[string]any{
 				"step_id": "step_extract_1",
 			},
 		},
@@ -385,12 +385,12 @@ func TestNatsServer_ProcessMessage_MissingIdentityFailFast(t *testing.T) {
 	}
 
 	// Request with missing identity
-	payloadStruct, _ := structpb.NewStruct(map[string]interface{}{
-		"node_config": map[string]interface{}{
+	payloadStruct, _ := structpb.NewStruct(map[string]any{
+		"node_config": map[string]any{
 			"node_name": "NoIdentityNode",
 		},
-		"global_state": map[string]interface{}{
-			"functional": map[string]interface{}{
+		"global_state": map[string]any{
+			"functional": map[string]any{
 				"step_id": "step_no_identity",
 			},
 		},

@@ -10,8 +10,9 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+    "google.golang.org/grpc/credentials/insecure"
 
-	pb "github.com/AndrewK4758/shared_protos"
+    pb "github.com/AndrewK4758/shared_protos"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/structpb"
 )
@@ -31,10 +32,10 @@ func TestStress_ConcurrentTaskCreation(t *testing.T) {
 	var createdCount int64
 	var existsCount int64
 
-	for i := 0; i < numGoroutines; i++ {
+	for i := range numGoroutines {
 		go func(gID int) {
 			defer wg.Done()
-			for j := 0; j < tasksPerGoroutine; j++ {
+			for j := range tasksPerGoroutine {
 				req := &pb.CreateTaskRequest{
 					Identity: &pb.InfrastructureIdentity{
 						TenantId: fmt.Sprintf("tenant_%d", gID),
@@ -82,7 +83,7 @@ func TestStress_ConcurrentReadWriteDelete(t *testing.T) {
 	const numDeleters = 10
 
 	// 1. Writers adding tasks
-	for i := 0; i < numWriters; i++ {
+	for i := range numWriters {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
@@ -109,10 +110,8 @@ func TestStress_ConcurrentReadWriteDelete(t *testing.T) {
 	}
 
 	// 2. Readers streaming pending tasks
-	for i := 0; i < numReaders; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range numReaders {
+		wg.Go(func() {
 			for {
 				select {
 				case <-ctx.Done():
@@ -123,14 +122,12 @@ func TestStress_ConcurrentReadWriteDelete(t *testing.T) {
 					time.Sleep(2 * time.Millisecond)
 				}
 			}
-		}()
+		})
 	}
 
 	// 3. Deleters removing tasks
-	for i := 0; i < numDeleters; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range numDeleters {
+		wg.Go(func() {
 			for {
 				select {
 				case <-ctx.Done():
@@ -149,7 +146,7 @@ func TestStress_ConcurrentReadWriteDelete(t *testing.T) {
 					time.Sleep(3 * time.Millisecond)
 				}
 			}
-		}()
+		})
 	}
 
 	wg.Wait()
@@ -160,7 +157,7 @@ func TestStateMachine_ConcurrentSubmitCorrection(t *testing.T) {
 	mockOrch := &mockOrchestratorServer{}
 	addr, cleanup := startMockOrchestrator(t, mockOrch)
 	defer cleanup()
-	conn, _ := grpc.Dial(addr, grpc.WithInsecure())
+	conn, _ := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	defer conn.Close()
 	s := NewHumanValidationServer(&mockJetStreamForServer{}, pb.NewOrchestratorServiceClient(conn))
 	ctx := context.Background()
@@ -198,7 +195,7 @@ func TestStateMachine_ConcurrentSubmitCorrection(t *testing.T) {
 	}
 	results := make([]result, numCallers)
 
-	for i := 0; i < numCallers; i++ {
+	for i := range numCallers {
 		go func(idx int) {
 			defer wg.Done()
 			r, err := s.SubmitCorrection(ctx, &pb.SubmitCorrectionRequest{
@@ -251,7 +248,7 @@ func TestStateMachine_RollbackAndRetry(t *testing.T) {
 	mockOrch := &mockOrchestratorServer{}
 	addr, cleanup := startMockOrchestrator(t, mockOrch)
 	defer cleanup()
-	conn, _ := grpc.Dial(addr, grpc.WithInsecure())
+	conn, _ := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	defer conn.Close()
 	s := NewHumanValidationServer(&mockJetStreamForServer{}, pb.NewOrchestratorServiceClient(conn))
 	ctx := context.Background()
@@ -329,15 +326,15 @@ func TestNatsServer_ConcurrentProcessing(t *testing.T) {
 
 	ctx := context.Background()
 
-	for i := 0; i < numMsgs; i++ {
+	for i := range numMsgs {
 		go func(idx int) {
 			defer wg.Done()
-			payloadStruct, _ := structpb.NewStruct(map[string]interface{}{
-				"node_config": map[string]interface{}{
+			payloadStruct, _ := structpb.NewStruct(map[string]any{
+				"node_config": map[string]any{
 					"node_name": "NatsStep",
 				},
-				"global_state": map[string]interface{}{
-					"functional": map[string]interface{}{
+				"global_state": map[string]any{
+					"functional": map[string]any{
 						"step_id": fmt.Sprintf("step_nats_%d", idx),
 					},
 				},

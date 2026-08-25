@@ -264,11 +264,11 @@ func TestHumanValidationServer_CreateValidationTask_Idempotency(t *testing.T) {
 					resp, err = s.CreateValidationTask(ctx, req)
 				}()
 				return
-			} else {
-				resp, err = s.CreateValidationTask(ctx, req)
 			}
 
-			if err != nil {
+            resp, err = s.CreateValidationTask(ctx, req)
+
+            if err != nil {
 				t.Fatalf("Failed to create task: %v", err)
 			}
 
@@ -541,10 +541,12 @@ func TestHumanValidationServer_SubmitCorrection(t *testing.T) {
 	})
 
 	t.Run("Orchestrator ResumeJob Success -> Status Resolved", func(t *testing.T) {
+		var receivedCallbackAddr string
 		mockOrch.resumeJobFunc = func(ctx context.Context, req *pb.ResumeJobRequest, opts ...grpc.CallOption) (*pb.ResumeJobResponse, error) {
 			if req.GetStepId() != "step_succ" {
 				return nil, fmt.Errorf("unexpected step id %s", req.GetStepId())
 			}
+			receivedCallbackAddr = req.GetCallbackAddress()
 			return &pb.ResumeJobResponse{Success: true, Message: "Job resumed"}, nil
 		}
 
@@ -554,7 +556,8 @@ func TestHumanValidationServer_SubmitCorrection(t *testing.T) {
 				AppId:    "app_test",
 				JobId:    "job_succ",
 			},
-			StepId: "step_succ",
+			StepId:          "step_succ",
+			CallbackAddress: "http://artemis:5000",
 		})
 		if err != nil {
 			t.Fatalf("Failed to create task: %v", err)
@@ -580,6 +583,12 @@ func TestHumanValidationServer_SubmitCorrection(t *testing.T) {
 		task := getTask(s, taskId)
 		if task.Status != TaskStatusResolved {
 			t.Fatalf("Expected task status %s, got %s", TaskStatusResolved, task.Status)
+		}
+		if task.CallbackAddress != "http://artemis:5000" {
+			t.Fatalf("Expected stored callback_address 'http://artemis:5000', got %s", task.CallbackAddress)
+		}
+		if receivedCallbackAddr != "http://artemis:5000" {
+			t.Fatalf("Expected ResumeJob callback_address 'http://artemis:5000', got %s", receivedCallbackAddr)
 		}
 	})
 
