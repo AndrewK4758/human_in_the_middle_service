@@ -19,7 +19,6 @@ func TestHumanValidationServer_CreateAndList(t *testing.T) {
 
 	ctx := context.Background()
 
-	// 1. Create a task
 	createReq := &pb.CreateTaskRequest{
 		Identity: &pb.InfrastructureIdentity{
 			TenantId: "tenant_test",
@@ -46,7 +45,6 @@ func TestHumanValidationServer_CreateAndList(t *testing.T) {
 		t.Fatalf("Expected status %s, got %s", TaskStatusCreated, createResp.GetStatus())
 	}
 
-	// Verify trace event published
 	events := mockPub.GetEvents("trace.validation.tenant_test.app_test")
 	if len(events) != 1 {
 		t.Fatalf("Expected 1 trace event, got %d", len(events))
@@ -59,7 +57,6 @@ func TestHumanValidationServer_CreateAndList(t *testing.T) {
 		t.Errorf("Expected event_type %s and status SUSPENDED, got %s / %s", EventTypeTaskSuspended, traceEvt.EventType, traceEvt.Status)
 	}
 
-	// 2. Get pending tasks with tenant filter
 	getReq := &pb.GetPendingTasksRequest{
 		FilterStatus: "PENDING",
 		Identity: &pb.InfrastructureIdentity{
@@ -112,7 +109,6 @@ func TestHumanValidationServer_DeleteTask(t *testing.T) {
 	defer s.Close()
 	ctx := context.Background()
 
-	// 1. Create a task
 	createReq := &pb.CreateTaskRequest{
 		Identity: &pb.InfrastructureIdentity{
 			TenantId: "tenant_test",
@@ -129,7 +125,6 @@ func TestHumanValidationServer_DeleteTask(t *testing.T) {
 
 	taskID := createResp.GetTaskId()
 
-	// 2. Delete the task
 	delReq := &pb.DeleteTaskRequest{
 		TaskId: taskID,
 		Identity: &pb.InfrastructureIdentity{
@@ -148,12 +143,10 @@ func TestHumanValidationServer_DeleteTask(t *testing.T) {
 		t.Fatalf("Expected success to be true")
 	}
 
-	// 3. Verify it's deleted from KV
 	if _, err := s.kv.Get(context.Background(), taskID); err == nil {
 		t.Fatalf("Expected task to be deleted from map")
 	}
 
-	// Verify trace event
 	events := mockPub.GetEvents("trace.validation.tenant_test.app_test")
 	foundDeleted := false
 	for _, e := range events {
@@ -167,7 +160,6 @@ func TestHumanValidationServer_DeleteTask(t *testing.T) {
 		t.Errorf("Expected TASK_DELETED trace event to be published")
 	}
 
-	// 4. Try to delete non-existent task
 	_, err = s.DeleteTask(ctx, &pb.DeleteTaskRequest{
 		TaskId: "non_existent",
 		Identity: &pb.InfrastructureIdentity{
@@ -296,7 +288,6 @@ func TestHumanValidationServer_MultiTenantStreaming(t *testing.T) {
 	defer s.Close()
 	ctx := context.Background()
 
-	// Create 2 tasks for tenant A
 	_, err := s.CreateValidationTask(ctx, &pb.CreateTaskRequest{
 		Identity: &pb.InfrastructureIdentity{TenantId: "tenant-A", AppId: "app-1", JobId: "job-1"},
 		StepId:   "step-1",
@@ -313,7 +304,6 @@ func TestHumanValidationServer_MultiTenantStreaming(t *testing.T) {
 		t.Fatalf("Failed to create task: %v", err)
 	}
 
-	// Create 1 task for tenant B
 	_, err = s.CreateValidationTask(ctx, &pb.CreateTaskRequest{
 		Identity: &pb.InfrastructureIdentity{TenantId: "tenant-B", AppId: "app-1", JobId: "job-3"},
 		StepId:   "step-1",
@@ -322,7 +312,6 @@ func TestHumanValidationServer_MultiTenantStreaming(t *testing.T) {
 		t.Fatalf("Failed to create task: %v", err)
 	}
 
-	// Stream for tenant A
 	streamA := &mockGetPendingTasksServer{tasks: make([]*pb.PendingTask, 0)}
 	err = s.GetPendingTasks(&pb.GetPendingTasksRequest{
 		Identity: &pb.InfrastructureIdentity{TenantId: "tenant-A", AppId: "app-1"},
@@ -347,7 +336,6 @@ func TestHumanValidationServer_PessimisticLeaseClaimAndRelease(t *testing.T) {
 	defer s.Close()
 	ctx := context.Background()
 
-	// 1. Create a task
 	createResp, err := s.CreateValidationTask(ctx, &pb.CreateTaskRequest{
 		Identity: &pb.InfrastructureIdentity{TenantId: "tenant-1", AppId: "app-1", JobId: "job-lease"},
 		StepId:   "step-lease",
@@ -359,7 +347,6 @@ func TestHumanValidationServer_PessimisticLeaseClaimAndRelease(t *testing.T) {
 
 	identity := &pb.InfrastructureIdentity{TenantId: "tenant-1", AppId: "app-1", JobId: "job-lease"}
 
-	// 2. Operator 1 claims the task
 	claimResp1, err := s.ClaimTask(ctx, &pb.ClaimTaskRequest{
 		TaskId:       taskId,
 		OperatorId:   "operator-alice",
@@ -384,7 +371,6 @@ func TestHumanValidationServer_PessimisticLeaseClaimAndRelease(t *testing.T) {
 		t.Errorf("Expected claimed_by 'operator-alice', got %s", task.GetClaimedBy())
 	}
 
-	// 3. Operator 2 attempts to claim while active -> MUST FAIL
 	claimResp2, err := s.ClaimTask(ctx, &pb.ClaimTaskRequest{
 		TaskId:       taskId,
 		OperatorId:   "operator-bob",
@@ -398,7 +384,6 @@ func TestHumanValidationServer_PessimisticLeaseClaimAndRelease(t *testing.T) {
 		t.Fatalf("Expected conflicting claim by operator-bob to fail while alice holds active lease")
 	}
 
-	// 4. Operator 1 releases the task
 	relResp, err := s.ReleaseTask(ctx, &pb.ReleaseTaskRequest{
 		TaskId:     taskId,
 		OperatorId: "operator-alice",
@@ -419,7 +404,6 @@ func TestHumanValidationServer_PessimisticLeaseClaimAndRelease(t *testing.T) {
 		t.Errorf("Expected empty claimed_by after release, got %s", taskAfterRel.GetClaimedBy())
 	}
 
-	// 5. Operator 2 can now claim the released task
 	claimRespBob, err := s.ClaimTask(ctx, &pb.ClaimTaskRequest{
 		TaskId:       taskId,
 		OperatorId:   "operator-bob",
@@ -449,7 +433,7 @@ func TestHumanValidationServer_LeaseReaper_AutoRecovery(t *testing.T) {
 	}
 	taskId := createResp.GetTaskId()
 
-	// Manually set task in PROCESSING status with expired lease (in the past)
+	// Seed a PROCESSING task with an already-expired lease.
 	task := getTask(s, taskId)
 	task.Status = TaskStatusProcessing
 	task.ClaimedBy = "operator-crashed"
@@ -457,10 +441,8 @@ func TestHumanValidationServer_LeaseReaper_AutoRecovery(t *testing.T) {
 	taskBytes, _ := proto.Marshal(task)
 	s.kv.Put(ctx, taskId, taskBytes)
 
-	// Run reaper pass
 	s.reapExpiredLeases(ctx)
 
-	// Verify task reverted to PENDING
 	reapedTask := getTask(s, taskId)
 	if reapedTask.GetStatus() != TaskStatusPending {
 		t.Errorf("Expected reaped task status %s, got %s", TaskStatusPending, reapedTask.GetStatus())
@@ -507,7 +489,6 @@ func TestHumanValidationServer_SubmitCorrection(t *testing.T) {
 		}
 		taskId := createResp.GetTaskId()
 
-		// Claim task
 		_, err = s.ClaimTask(ctx, &pb.ClaimTaskRequest{
 			TaskId:     taskId,
 			OperatorId: "alice",
@@ -517,7 +498,6 @@ func TestHumanValidationServer_SubmitCorrection(t *testing.T) {
 			t.Fatalf("Failed to claim task: %v", err)
 		}
 
-		// Submit correction
 		resp, err := s.SubmitCorrection(ctx, &pb.SubmitCorrectionRequest{
 			TaskId: taskId,
 			Identity: &pb.InfrastructureIdentity{

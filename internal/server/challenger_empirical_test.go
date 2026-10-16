@@ -24,10 +24,6 @@ func init() {
 	os.Setenv("ORCHESTRATOR_ADDRESS", "localhost:11112")
 }
 
-// -----------------------------------------------------------------------------
-// Test 1: Edge-case inputs to SubmitCorrection and NatsServer.processMessage
-// -----------------------------------------------------------------------------
-
 func TestChallenger_SubmitCorrection_EdgeCases(t *testing.T) {
 	mockOrch := &mockOrchestratorServer{}
 	addr, cleanup := startMockOrchestrator(t, mockOrch)
@@ -37,7 +33,6 @@ func TestChallenger_SubmitCorrection_EdgeCases(t *testing.T) {
 	s := NewHumanValidationServer(&mockJetStreamForServer{}, pb.NewOrchestratorServiceClient(conn))
 	ctx := context.Background()
 
-	// 1.1 Non-existent Task ID
 	_, err := s.SubmitCorrection(ctx, &pb.SubmitCorrectionRequest{
 		TaskId:    "non_existent_123",
 		Corrected: unmarshalStruct(`{"key": "value"}`),
@@ -46,7 +41,6 @@ func TestChallenger_SubmitCorrection_EdgeCases(t *testing.T) {
 		t.Fatalf("Expected 'not found' error for non-existent task, got: %v", err)
 	}
 
-	// 1.2 Empty Task ID
 	_, err = s.SubmitCorrection(ctx, &pb.SubmitCorrectionRequest{
 		TaskId:    "",
 		Corrected: unmarshalStruct(`{"key": "value"}`),
@@ -55,7 +49,6 @@ func TestChallenger_SubmitCorrection_EdgeCases(t *testing.T) {
 		t.Fatalf("Expected 'missing required taskId' error for empty task ID, got: %v", err)
 	}
 
-	// 1.3 Task created with nil Identity panics due to fail-fast assertion
 	func() {
 		defer func() {
 			if r := recover(); r == nil {
@@ -68,8 +61,6 @@ func TestChallenger_SubmitCorrection_EdgeCases(t *testing.T) {
 		})
 	}()
 
-	// 1.4 Invalid status transitions
-	// Create task and force various status strings
 	createResp2, err := s.CreateValidationTask(ctx, &pb.CreateTaskRequest{
 		Identity: &pb.InfrastructureIdentity{
 			TenantId: "tenant_status",
@@ -104,7 +95,6 @@ func TestChallenger_SubmitCorrection_EdgeCases(t *testing.T) {
 		}
 	}
 
-	// 1.5 2MB payload within default gRPC limits
 	setTaskStatus(s, taskIdStatus, TaskStatusPending)
 
 	largeJson2MB := `{"large_field": "` + strings.Repeat("A", 2*1024*1024) + `", "unicode": "こんにちは世界 🚀 \n\t\""}`
@@ -125,13 +115,12 @@ func TestChallenger_SubmitCorrection_EdgeCases(t *testing.T) {
 	if !respLarge.GetSuccess() {
 		t.Fatalf("Expected success for 2MB payload")
 	}
+	// Compare lengths rather than exact strings since protojson formatting may vary.
 	if len(receivedJson) < len(largeJson2MB)-100 {
 		t.Errorf("Payload byte corruption detected for 2MB JSON!\nExpected len: %d\nGot len: %d", len(largeJson2MB), len(receivedJson))
 	}
-	// Removed exact string match because protojson formatting changes spacing
 
-	// 1.6 >4MB payload exceeds default gRPC 4MB limit -> verify graceful rollback to PENDING
-	// Create another task
+	// Payloads over 4MB exceed the default gRPC client limit and should roll the task back to PENDING.
 	createRespExceed, _ := s.CreateValidationTask(ctx, &pb.CreateTaskRequest{
 		Identity: &pb.InfrastructureIdentity{
 			TenantId: "tenant_exceed",
@@ -171,7 +160,6 @@ func TestChallenger_NatsServer_ProcessMessage_EdgeCases(t *testing.T) {
 	}
 	ctx := context.Background()
 
-	// 1.7 Empty byte slice payload []byte{} (missing identity -> fail fast panic)
 	msgEmpty := &mockMsg{
 		data:    []byte{},
 		subject: "worker.human.validation",
@@ -185,7 +173,6 @@ func TestChallenger_NatsServer_ProcessMessage_EdgeCases(t *testing.T) {
 		natsServer.processMessage(ctx, msgEmpty)
 	}()
 
-	// 1.8 Proto message with ALL optional fields nil (Identity, TaskSubject, Payload)
 	reqNilFields := &pb.ExecuteTaskRequest{}
 	reqBytes, _ := proto.Marshal(reqNilFields)
 	msgNilFields := &mockMsg{
@@ -201,7 +188,6 @@ func TestChallenger_NatsServer_ProcessMessage_EdgeCases(t *testing.T) {
 		natsServer.processMessage(ctx, msgNilFields)
 	}()
 
-	// 1.9 NATS publish failure on reply subject
 	mockJSFail := newMockJetStream()
 	mockJSFail.publishErr = fmt.Errorf("JetStream storage full")
 	natsServerFail := &NatsServer{
@@ -249,12 +235,7 @@ func TestChallenger_NatsServer_ProcessMessage_EdgeCases(t *testing.T) {
 	}
 }
 
-// -----------------------------------------------------------------------------
-// Test 2: Orchestrator disconnect handling and rollback logic
-// -----------------------------------------------------------------------------
-
 func TestChallenger_OrchestratorDisconnectAndRollback(t *testing.T) {
-	// Start mock orchestrator on a dynamic port
 	mockOrch := &mockOrchestratorServer{}
 	addr, cleanup := startMockOrchestrator(t, mockOrch)
 	defer cleanup()
@@ -263,7 +244,6 @@ func TestChallenger_OrchestratorDisconnectAndRollback(t *testing.T) {
 	s := NewHumanValidationServer(&mockJetStreamForServer{}, pb.NewOrchestratorServiceClient(conn))
 	ctx := context.Background()
 
-	// Create task
 	createResp, err := s.CreateValidationTask(ctx, &pb.CreateTaskRequest{
 		Identity: &pb.InfrastructureIdentity{
 			TenantId: "tenant_disc",
@@ -277,8 +257,8 @@ func TestChallenger_OrchestratorDisconnectAndRollback(t *testing.T) {
 	}
 	taskId := createResp.GetTaskId()
 
-	// 2.1 Close orchestrator server to simulate hard network disconnect / server crash
-	cleanup() // closes listener and stops server
+	// Stop the orchestrator server to simulate a hard network disconnect.
+	cleanup()
 
 	_, err = s.SubmitCorrection(ctx, &pb.SubmitCorrectionRequest{
 		TaskId:    taskId,
@@ -288,14 +268,12 @@ func TestChallenger_OrchestratorDisconnectAndRollback(t *testing.T) {
 		t.Fatalf("Expected error when orchestrator is completely shut down")
 	}
 
-	// Verify rollback to PENDING
 	statusAfterCrash := getTask(s, taskId).Status
 
 	if statusAfterCrash != TaskStatusPending {
 		t.Fatalf("Expected task status rolled back to PENDING after server crash, got: %s", statusAfterCrash)
 	}
 
-	// 2.2 Re-start orchestrator on a NEW dynamic address, update server orchestratorAddr, retry
 	mockOrch2 := &mockOrchestratorServer{}
 	newAddr, cleanup2 := startMockOrchestrator(t, mockOrch2)
 	defer cleanup2()
@@ -318,7 +296,6 @@ func TestChallenger_OrchestratorDisconnectAndRollback(t *testing.T) {
 		t.Fatalf("Expected final status RESOLVED after recovery, got: %s", finalStatus)
 	}
 
-	// 2.3 Context deadline / cancellation handling during SubmitCorrection
 	createResp3, _ := s.CreateValidationTask(ctx, &pb.CreateTaskRequest{
 		Identity: &pb.InfrastructureIdentity{
 			TenantId: "tenant_timeout",
@@ -329,7 +306,6 @@ func TestChallenger_OrchestratorDisconnectAndRollback(t *testing.T) {
 	})
 	taskIdTimeout := createResp3.GetTaskId()
 
-	// Mock orchestrator that hangs until context is done
 	mockOrch2.resumeJobFunc = func(ctx context.Context, req *pb.ResumeJobRequest, opts ...grpc.CallOption) (*pb.ResumeJobResponse, error) {
 		<-ctx.Done()
 		return nil, ctx.Err()
@@ -353,10 +329,6 @@ func TestChallenger_OrchestratorDisconnectAndRollback(t *testing.T) {
 	}
 }
 
-// -----------------------------------------------------------------------------
-// Test 3: String preservation (ExpectedJsonSchema, PromptInstructions, GlobalStateJson)
-// -----------------------------------------------------------------------------
-
 func TestChallenger_StringPreservationFidelity(t *testing.T) {
 	valServer := NewHumanValidationServer(&mockJetStreamForServer{}, nil)
 	mockJS := newMockJetStream()
@@ -367,7 +339,6 @@ func TestChallenger_StringPreservationFidelity(t *testing.T) {
 		validationServer: valServer,
 	}
 
-	// Construct complex inputs with special characters, multiline, backslashes, unicode, large JSON
 	complexSchema := `{
 		"$schema": "http://json-schema.org/draft-07/schema#",
 		"title": "Complex Document Schema with Unicode 🚀 中文 €",
@@ -446,7 +417,6 @@ func TestChallenger_StringPreservationFidelity(t *testing.T) {
 		t.Fatalf("Message was not acked by NatsServer")
 	}
 
-	// Fetch task from HumanValidationServer via GetPendingTasks
 	stream := &mockGetPendingTasksServer{tasks: make([]*pb.PendingTask, 0)}
 	err = valServer.GetPendingTasks(&pb.GetPendingTasksRequest{FilterStatus: "PENDING"}, stream)
 	if err != nil {
@@ -459,17 +429,14 @@ func TestChallenger_StringPreservationFidelity(t *testing.T) {
 
 	task := stream.tasks[0]
 
-	// 3.1 Verify ExpectedJsonSchema byte-for-byte
 	if task.GetExpectedSchema() == nil {
 		t.Errorf("ExpectedJsonSchema CORRUPTED or TRUNCATED!\nExpected len: %d\nGot len: %d", len(complexSchema), 0)
 	}
 
-	// 3.2 Verify PromptInstructions byte-for-byte
 	if task.GetPromptInstructions() != complexPrompt {
 		t.Errorf("PromptInstructions CORRUPTED or TRUNCATED!\nExpected len: %d\nGot len: %d", len(complexPrompt), len(task.GetPromptInstructions()))
 	}
 
-	// 3.3 Verify GlobalStateJson contains all expected fields
 	globalStateJSON := task.GetGlobalState()
 	if globalStateJSON == nil {
 		t.Fatalf("GlobalStateJson is empty!")

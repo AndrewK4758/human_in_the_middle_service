@@ -82,7 +82,6 @@ func TestStress_ConcurrentReadWriteDelete(t *testing.T) {
 	const numReaders = 20
 	const numDeleters = 10
 
-	// 1. Writers adding tasks
 	for i := range numWriters {
 		wg.Add(1)
 		go func(id int) {
@@ -109,7 +108,6 @@ func TestStress_ConcurrentReadWriteDelete(t *testing.T) {
 		}(i)
 	}
 
-	// 2. Readers streaming pending tasks
 	for range numReaders {
 		wg.Go(func() {
 			for {
@@ -125,7 +123,6 @@ func TestStress_ConcurrentReadWriteDelete(t *testing.T) {
 		})
 	}
 
-	// 3. Deleters removing tasks
 	for range numDeleters {
 		wg.Go(func() {
 			for {
@@ -162,15 +159,13 @@ func TestStateMachine_ConcurrentSubmitCorrection(t *testing.T) {
 	s := NewHumanValidationServer(&mockJetStreamForServer{}, pb.NewOrchestratorServiceClient(conn))
 	ctx := context.Background()
 
-	// Setup slow orchestrator response
 	var orchCallCount int64
 	mockOrch.resumeJobFunc = func(ctx context.Context, req *pb.ResumeJobRequest, opts ...grpc.CallOption) (*pb.ResumeJobResponse, error) {
 		atomic.AddInt64(&orchCallCount, 1)
-		time.Sleep(50 * time.Millisecond) // simulate work
+		time.Sleep(50 * time.Millisecond)
 		return &pb.ResumeJobResponse{Success: true, Message: "resumed"}, nil
 	}
 
-	// Create 1 task
 	createResp, err := s.CreateValidationTask(ctx, &pb.CreateTaskRequest{
 		Identity: &pb.InfrastructureIdentity{
 			TenantId: "tenant_state",
@@ -184,7 +179,6 @@ func TestStateMachine_ConcurrentSubmitCorrection(t *testing.T) {
 	}
 	taskId := createResp.GetTaskId()
 
-	// Launch 20 concurrent goroutines calling SubmitCorrection for the SAME task
 	const numCallers = 20
 	var wg sync.WaitGroup
 	wg.Add(numCallers)
@@ -208,7 +202,6 @@ func TestStateMachine_ConcurrentSubmitCorrection(t *testing.T) {
 
 	wg.Wait()
 
-	// Analyze results
 	var successCount int
 	var errAlreadyProcessingCount int
 	var idempotentSuccessCount int
@@ -266,7 +259,6 @@ func TestStateMachine_RollbackAndRetry(t *testing.T) {
 	}
 	taskId := createResp.GetTaskId()
 
-	// Phase 1: Fail Orchestrator call
 	mockOrch.resumeJobFunc = func(ctx context.Context, req *pb.ResumeJobRequest, opts ...grpc.CallOption) (*pb.ResumeJobResponse, error) {
 		return nil, fmt.Errorf("temporary network error")
 	}
@@ -279,14 +271,12 @@ func TestStateMachine_RollbackAndRetry(t *testing.T) {
 		t.Fatalf("Expected error on orchestrator failure")
 	}
 
-	// Verify rollback to PENDING
 	statusAfterFail := getTask(s, taskId).Status
 
 	if statusAfterFail != TaskStatusPending {
 		t.Fatalf("Expected status to roll back to PENDING, got %s", statusAfterFail)
 	}
 
-	// Phase 2: Fix Orchestrator and retry
 	mockOrch.resumeJobFunc = func(ctx context.Context, req *pb.ResumeJobRequest, opts ...grpc.CallOption) (*pb.ResumeJobResponse, error) {
 		return &pb.ResumeJobResponse{Success: true, Message: "resumed after retry"}, nil
 	}
@@ -302,7 +292,6 @@ func TestStateMachine_RollbackAndRetry(t *testing.T) {
 		t.Fatalf("Expected success on retry")
 	}
 
-	// Verify final status RESOLVED
 	statusAfterSuccess := getTask(s, taskId).Status
 
 	if statusAfterSuccess != TaskStatusResolved {

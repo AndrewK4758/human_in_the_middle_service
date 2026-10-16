@@ -20,7 +20,6 @@ import (
 )
 
 func main() {
-	// Attempt to load .env, ignore error if it doesn't exist
 	envutil.LoadEnv(".env", "human_validation_service/.env", "../.env", "../../.env")
 	logger.InitLogger()
 
@@ -38,7 +37,6 @@ func main() {
 
 	orchestratorAddr := envutil.MustGetString("ORCHESTRATOR_ADDRESS")
 
-	// Connect to Orchestrator once
 	conn, err := grpc.NewClient(orchestratorAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		logger.Fatal("HumanValidation", "Failed to connect to orchestrator at %s: %v", orchestratorAddr, err)
@@ -66,10 +64,7 @@ func main() {
 
 	grpcServer := grpc.NewServer()
 
-	// Register the Human Validation service
 	pb.RegisterHumanValidationServiceServer(grpcServer, validationServer)
-
-	// Register reflection service on gRPC server so clients can query it
 	reflection.Register(grpcServer)
 
 	logger.Info("HumanValidation", "Human Validation Service starting on port %s...", port)

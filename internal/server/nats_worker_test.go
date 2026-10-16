@@ -384,7 +384,6 @@ func TestNatsServer_ProcessMessage_MissingIdentityFailFast(t *testing.T) {
 		validationServer: valServer,
 	}
 
-	// Request with missing identity
 	payloadStruct, _ := structpb.NewStruct(map[string]any{
 		"node_config": map[string]any{
 			"node_name": "NoIdentityNode",
@@ -454,7 +453,7 @@ func TestHandleMessageWithRecovery_Panic_NakWithDelay(t *testing.T) {
 	}
 	sem := make(chan struct{}, 1)
 
-	// processMessage panics because req is empty (GetTaskSubject == "")
+	// Empty message payload triggers a validation panic in processMessage.
 	server.HandleMessageWithRecovery(context.Background(), msg, sem)
 
 	if !msg.nacked {
